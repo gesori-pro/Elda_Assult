@@ -82,6 +82,20 @@ script ThreeLaneCombat extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method ThreeLaneData GetData()
+		-- 같은 PrototypeBoard의 MonsterData 캐시를 드레이크·7종 테스트 상태 생성에 사용한다.
+		---@type ThreeLaneData
+		local data = self.Entity:GetComponent("script.ThreeLaneData")
+		if not isvalid(data) then
+			return nil
+		end
+		if not data.IsReady and not data:LoadAndValidate() then
+			return nil
+		end
+		return data
+	end
+
+	@ExecSpace("ServerOnly")
 	method void StartBattle(number speed)
 		-- Reveal에서 등록된 유닛을 유지한 채 새 전투의 Tick 누적을 0부터 시작한다.
 		self.SimAccumulator = 0
@@ -665,6 +679,10 @@ script ThreeLaneCombat extends Component
 			.. tostring(unit.LaneIndex)
 			.. ", Slot="
 			.. tostring(unit.SlotIndex)
+			.. ", MonsterId="
+			.. tostring(unit.MonsterId)
+			.. ", RangeClass="
+			.. tostring(unit.RangeClass)
 			.. ", SimX="
 			.. tostring(unit.SimX)
 		)
@@ -702,7 +720,7 @@ script ThreeLaneCombat extends Component
 
 	@ExecSpace("ServerOnly")
 	method boolean RunAllMakerTests()
-		-- Maker Play에서만 8개 전투 시나리오를 순서대로 실행하고 정상 상태로 복구한다.
+		-- Maker Play에서 Phase 2B 8종과 Phase 2C-2 3종을 실행하고 정상 상태로 복구한다.
 		self.MakerHarnessRunning = true
 		self.Speed1Signature = ""
 		self.Speed2Signature = ""
@@ -715,7 +733,10 @@ script ThreeLaneCombat extends Component
 			"SimultaneousNexusDraw",
 			"Timeout",
 			"Speed1",
-			"Speed2"
+			"Speed2",
+			"RangeClassEngage",
+			"FriendlyNoBlock",
+			"YetiNexusDamage"
 		}
 
 		for _, scenarioName in ipairs(scenarios) do
@@ -861,27 +882,101 @@ script ThreeLaneCombat extends Component
 			return true
 		end
 
+		if scenarioName == "RangeClassEngage" then
+			local melee = self:CreateTestMonster("slime", 1, 1, -3.0)
+			local meleeTarget = self:CreateTestMonster("drake", 2, 1, 0.0)
+			local ranged = self:CreateTestMonster("green_mushroom", 1, 3, -3.0)
+			local rangedTarget = self:CreateTestMonster("drake", 2, 3, 0.0)
+			if melee == nil or meleeTarget == nil or ranged == nil or rangedTarget == nil then
+				return false
+			end
+			meleeTarget.HP = 999999
+			meleeTarget.MaxHP = 999999
+			meleeTarget.Attack = 0
+			meleeTarget.MoveSpeed = 0
+			rangedTarget.HP = 999999
+			rangedTarget.MaxHP = 999999
+			rangedTarget.Attack = 0
+			rangedTarget.MoveSpeed = 0
+			self.ScenarioMetrics.MeleeId = melee.CombatUnitId
+			self.ScenarioMetrics.MeleeTargetId = meleeTarget.CombatUnitId
+			self.ScenarioMetrics.RangedId = ranged.CombatUnitId
+			self.ScenarioMetrics.RangedTargetId = rangedTarget.CombatUnitId
+			self.ActiveBattleLimitTicks = 240
+			return true
+		end
+
+		if scenarioName == "FriendlyNoBlock" then
+			local ranged = self:CreateTestMonster("green_mushroom", 1, 2, -3.0)
+			local friendlyFront = self:CreateTestMonster("stone_golem", 1, 2, -0.6)
+			local enemy = self:CreateTestMonster("drake", 2, 2, 0.6)
+			if ranged == nil or friendlyFront == nil or enemy == nil then
+				return false
+			end
+			friendlyFront.HP = 999999
+			friendlyFront.MaxHP = 999999
+			friendlyFront.Attack = 0
+			friendlyFront.MoveSpeed = 0
+			enemy.HP = 999999
+			enemy.MaxHP = 999999
+			enemy.Attack = 0
+			enemy.MoveSpeed = 0
+			self.ScenarioMetrics.RangedId = ranged.CombatUnitId
+			self.ScenarioMetrics.FriendlyId = friendlyFront.CombatUnitId
+			self.ScenarioMetrics.EnemyId = enemy.CombatUnitId
+			self.ActiveBattleLimitTicks = 240
+			return true
+		end
+
+		if scenarioName == "YetiNexusDamage" then
+			local yeti = self:CreateTestMonster("yeti", 1, 2, 5.35)
+			if yeti == nil then
+				return false
+			end
+			self.ScenarioMetrics.YetiId = yeti.CombatUnitId
+			return true
+		end
+
 		return false
 	end
 
 	@ExecSpace("ServerOnly")
 	method any CreateTestDrake(integer ownerSide, integer laneIndex, number simX)
-		-- 실제 엔티티 없이도 동일한 Combat 경로를 통과하는 드레이크 상태 테이블을 만든다.
+		-- 카드 5가 아닌 BalanceReference MonsterId로 드레이크 회귀 상태를 만든다.
+		return self:CreateTestMonster("drake", ownerSide, laneIndex, simX)
+	end
+
+	@ExecSpace("ServerOnly")
+	method any CreateTestMonster(string monsterId, integer ownerSide, integer laneIndex, number simX)
+		-- 실제 엔티티 없이 MonsterData 한 행을 동일한 Combat 경로의 상태 테이블로 변환한다.
+		local data = self:GetData()
+		if not isvalid(data) then
+			log_error("[ThreeLaneCombat][TEST] ThreeLaneData unavailable for " .. monsterId)
+			return nil
+		end
+		local monster = data:GetMonsterById(monsterId)
+		if monster == nil then
+			log_error("[ThreeLaneCombat][TEST] MonsterData missing MonsterId=" .. monsterId)
+			return nil
+		end
+
 		local unit = {
 			CombatUnitId = 0,
 			OwnerSide = ownerSide,
 			LaneIndex = laneIndex,
 			SlotIndex = 8,
-			CardIndex = 5,
-			Cost = 5,
-			HP = 600,
-			MaxHP = 600,
-			Attack = 120,
-			AttackIntervalTicks = 72,
-			FirstAttackDelayTicks = 18,
-			MoveSpeed = 1.0,
-			AttackRange = 0.70,
-			NexusDamage = 5,
+			CardIndex = monster.CardIndex,
+			MonsterId = monster.MonsterId,
+			RangeClass = monster.RangeClass,
+			Cost = monster.Cost,
+			HP = monster.HP,
+			MaxHP = monster.HP,
+			Attack = monster.Attack,
+			AttackIntervalTicks = monster.AttackIntervalTicks,
+			FirstAttackDelayTicks = monster.FirstAttackDelayTicks,
+			MoveSpeed = monster.MoveSpeed,
+			AttackRange = monster.AttackRange,
+			NexusDamage = monster.NexusDamage,
 			SimX = simX,
 			TargetNexusX = 5.35,
 			TargetCombatUnitId = 0,
@@ -1014,6 +1109,80 @@ script ThreeLaneCombat extends Component
 				and survivor.DeathTick == 3600
 				and board.EnemyNexusHp == 25
 				and board.Phase == "Resolve"
+		end
+
+		if scenarioName == "RangeClassEngage" then
+			local melee = self:GetUnitById(self.ScenarioMetrics.MeleeId)
+			local meleeTarget = self:GetUnitById(self.ScenarioMetrics.MeleeTargetId)
+			local ranged = self:GetUnitById(self.ScenarioMetrics.RangedId)
+			local rangedTarget = self:GetUnitById(self.ScenarioMetrics.RangedTargetId)
+			if melee == nil or meleeTarget == nil or ranged == nil or rangedTarget == nil then
+				return false
+			end
+			local meleeDistance = math.abs(meleeTarget.SimX - melee.SimX)
+			local rangedDistance = math.abs(rangedTarget.SimX - ranged.SimX)
+			log(
+				"[Phase2C2][RangeClass] MeleeEngage="
+				.. tostring(melee.EngageTick)
+				.. ", MeleeDistance="
+				.. tostring(meleeDistance)
+				.. ", RangedEngage="
+				.. tostring(ranged.EngageTick)
+				.. ", RangedDistance="
+				.. tostring(rangedDistance)
+			)
+			return melee.RangeClass == "Melee"
+				and ranged.RangeClass == "Ranged"
+				and math.abs(melee.AttackRange - 0.55) <= 0.000001
+				and math.abs(ranged.AttackRange - 2.20) <= 0.000001
+				and melee.EngageTick >= 0
+				and ranged.EngageTick >= 0
+				and ranged.EngageTick < melee.EngageTick
+				and rangedDistance > meleeDistance
+		end
+
+		if scenarioName == "FriendlyNoBlock" then
+			local ranged = self:GetUnitById(self.ScenarioMetrics.RangedId)
+			local enemy = self:GetUnitById(self.ScenarioMetrics.EnemyId)
+			if ranged == nil or enemy == nil then
+				return false
+			end
+			local firstTargetId = ranged.TargetHistory[1]
+			log(
+				"[Phase2C2][FriendlyNoBlock] Ranged="
+				.. tostring(ranged.CombatUnitId)
+				.. ", Friendly="
+				.. tostring(self.ScenarioMetrics.FriendlyId)
+				.. ", Enemy="
+				.. tostring(enemy.CombatUnitId)
+				.. ", FirstTarget="
+				.. tostring(firstTargetId)
+				.. ", AttackIntents="
+				.. tostring(#ranged.AttackIntentTicks)
+			)
+			return firstTargetId == enemy.CombatUnitId
+				and ranged.EngageTick >= 0
+				and #ranged.AttackIntentTicks > 0
+		end
+
+		if scenarioName == "YetiNexusDamage" then
+			local yeti = self:GetUnitById(self.ScenarioMetrics.YetiId)
+			if yeti == nil then
+				return false
+			end
+			log(
+				"[Phase2C2][YetiNexusDamage] Cost="
+				.. tostring(yeti.Cost)
+				.. ", NexusDamage="
+				.. tostring(yeti.NexusDamage)
+				.. ", EnemyNexusHp="
+				.. tostring(board.EnemyNexusHp)
+			)
+			return yeti.MonsterId == "yeti"
+				and yeti.Cost == 5
+				and yeti.NexusDamage == 8
+				and yeti.Exited == true
+				and board.EnemyNexusHp == 22
 		end
 
 		return false

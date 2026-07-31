@@ -11,6 +11,10 @@ script ThreeLaneUnit extends Component
 
 	property integer CardIndex = 5
 
+	property string MonsterId = "drake"
+
+	property string RangeClass = "Melee"
+
 	property integer Cost = 5
 
 	property integer HP = 600

@@ -54,8 +54,6 @@ script ThreeLaneBoard extends Component
 
 	property integer CostGainPerTurn = 2
 
-	property table CardCosts = { 1, 2, 3, 4, 5, 6, 8 }
-
 	property integer SpawnSerial = 0
 
 	property integer PlacementSerial = 0
@@ -72,14 +70,14 @@ script ThreeLaneBoard extends Component
 
 	property table UsedCards = {}
 
-	property integer DrakeCardIndex = 5
+	property integer EnemyFixedCardIndex = 5
 
 	property integer EnemyFixedSlotIndex = 8
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
 		-- 서버 전투 상태를 초기화하고 Phase 2A 턴 기반 시작을 기록한다.
-		log("[ThreeLaneBoard] OnBeginPlay - Phase 2B board authority ready")
+		log("[ThreeLaneBoard] OnBeginPlay - Phase 2C-2 data-driven board authority ready")
 		self:ResetBattle()
 	end
 
@@ -149,7 +147,12 @@ script ThreeLaneBoard extends Component
 			return false
 		end
 
-		local cost = self.CardCosts[cardIndex]
+		local monster = self:GetMonsterByCardIndex(cardIndex)
+		if monster == nil then
+			log_error("[ThreeLaneBoard] Placement rejected - MonsterData missing card " .. tostring(cardIndex))
+			return false
+		end
+		local cost = monster.Cost
 		if self.CurrentCost < cost then
 			log(
 				"[ThreeLaneBoard] Placement rejected - not enough cost. need="
@@ -170,6 +173,8 @@ script ThreeLaneBoard extends Component
 			{
 				Order = self.PlacementSerial,
 				CardIndex = cardIndex,
+				MonsterId = monster.MonsterId,
+				Cost = cost,
 				SlotIndex = slotIndex,
 				Position = spawnPosition,
 				OwnerUserId = ownerUserId,
@@ -268,7 +273,10 @@ script ThreeLaneBoard extends Component
 		end
 
 		local slotIndex = target.SlotIndex
-		local refund = self.CardCosts[target.CardIndex]
+		local refund = target.Cost
+		if refund == nil then
+			refund = self:GetCardCost(target.CardIndex)
+		end
 		self.CurrentCost = self.CurrentCost + refund
 		self.UsedCards[target.CardIndex] = false
 		self:RefreshUsedCardMask()
@@ -380,7 +388,22 @@ script ThreeLaneBoard extends Component
 
 	@ExecSpace("ServerOnly")
 	method void SpawnPlacement(table command)
-		-- 양 진영 공통 명령 하나를 수동 상태 유닛으로 생성하고 Combat에 등록한다.
+		-- 양 진영 공통 명령의 MonsterData를 실제 유닛 상태에 주입하고 Combat에 등록한다.
+		local monster = nil
+		if command.MonsterId ~= nil and command.MonsterId ~= "" then
+			monster = self:GetMonsterById(command.MonsterId)
+		end
+		if monster == nil then
+			monster = self:GetMonsterByCardIndex(command.CardIndex)
+		end
+		if monster == nil then
+			log_error(
+				"[ThreeLaneBoard] Spawn rejected - MonsterData missing Card="
+				.. tostring(command.CardIndex)
+			)
+			return
+		end
+
 		self.SpawnSerial = self.SpawnSerial + 1
 		local ownerSide = command.OwnerSide
 		if ownerSide ~= 2 then
@@ -420,21 +443,22 @@ script ThreeLaneBoard extends Component
 			return
 		end
 
-		local cost = self.CardCosts[command.CardIndex]
 		local laneIndex = math.floor((command.SlotIndex - 1) / 5) + 1
 		unitComponent.OwnerSide = ownerSide
 		unitComponent.LaneIndex = laneIndex
 		unitComponent.SlotIndex = command.SlotIndex
-		unitComponent.CardIndex = command.CardIndex
-		unitComponent.Cost = cost
-		unitComponent.HP = 600
-		unitComponent.MaxHP = 600
-		unitComponent.Attack = 120
-		unitComponent.AttackIntervalTicks = 72
-		unitComponent.FirstAttackDelayTicks = 18
-		unitComponent.MoveSpeed = 1.0
-		unitComponent.AttackRange = 0.70
-		unitComponent.NexusDamage = cost
+		unitComponent.CardIndex = monster.CardIndex
+		unitComponent.MonsterId = monster.MonsterId
+		unitComponent.RangeClass = monster.RangeClass
+		unitComponent.Cost = monster.Cost
+		unitComponent.HP = monster.HP
+		unitComponent.MaxHP = monster.HP
+		unitComponent.Attack = monster.Attack
+		unitComponent.AttackIntervalTicks = monster.AttackIntervalTicks
+		unitComponent.FirstAttackDelayTicks = monster.FirstAttackDelayTicks
+		unitComponent.MoveSpeed = monster.MoveSpeed
+		unitComponent.AttackRange = monster.AttackRange
+		unitComponent.NexusDamage = monster.NexusDamage
 		unitComponent.SimX = command.Position.x
 		unitComponent.TargetNexusX = 5.35
 		if ownerSide == 2 then
@@ -466,13 +490,28 @@ script ThreeLaneBoard extends Component
 			.. ", Order="
 			.. tostring(command.Order)
 			.. ", Card="
-			.. tostring(command.CardIndex)
+			.. tostring(unitComponent.CardIndex)
+			.. ", MonsterId="
+			.. unitComponent.MonsterId
 			.. ", Slot="
 			.. tostring(command.SlotIndex)
 			.. ", Cost="
 			.. tostring(unitComponent.Cost)
-			.. ", HP=600, Attack=120, AttackIntervalTicks=72, FirstAttackDelayTicks=18"
-			.. ", MoveSpeed=1.0, AttackRange=0.70, NexusDamage="
+			.. ", HP="
+			.. tostring(unitComponent.HP)
+			.. ", Attack="
+			.. tostring(unitComponent.Attack)
+			.. ", AttackIntervalTicks="
+			.. tostring(unitComponent.AttackIntervalTicks)
+			.. ", FirstAttackDelayTicks="
+			.. tostring(unitComponent.FirstAttackDelayTicks)
+			.. ", MoveSpeed="
+			.. tostring(unitComponent.MoveSpeed)
+			.. ", RangeClass="
+			.. unitComponent.RangeClass
+			.. ", AttackRange="
+			.. tostring(unitComponent.AttackRange)
+			.. ", NexusDamage="
 			.. tostring(unitComponent.NexusDamage)
 		)
 	end
@@ -723,8 +762,42 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method ThreeLaneData GetData()
+		-- 같은 PrototypeBoard의 검증 완료 MonsterData 캐시를 반환한다.
+		---@type ThreeLaneData
+		local data = self.Entity:GetComponent("script.ThreeLaneData")
+		if not isvalid(data) then
+			return nil
+		end
+		if not data.IsReady and not data:LoadAndValidate() then
+			return nil
+		end
+		return data
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetMonsterByCardIndex(integer cardIndex)
+		-- 실제 플레이 카드 번호를 MonsterData 기본 7종 행으로 변환한다.
+		local data = self:GetData()
+		if not isvalid(data) then
+			return nil
+		end
+		return data:GetMonsterByCardIndex(cardIndex)
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetMonsterById(string monsterId)
+		-- 테스트 기준 드레이크를 포함해 MonsterId로 데이터 행을 조회한다.
+		local data = self:GetData()
+		if not isvalid(data) then
+			return nil
+		end
+		return data:GetMonsterById(monsterId)
+	end
+
+	@ExecSpace("ServerOnly")
 	method void PrepareEnemyPlacementForTurn()
-		-- 플레이어 입력 전에 Turn 3의 독립 중앙 드레이크 명령을 만들고 그 외 턴은 패스한다.
+		-- 플레이어 입력 전에 Turn 3의 독립 중앙 예티 명령을 만들고 그 외 턴은 패스한다.
 		self.EnemyPendingPlacements = {}
 		self.EnemyPendingCount = 0
 		self.EnemyPlacementSerial = 0
@@ -739,9 +812,14 @@ script ThreeLaneBoard extends Component
 			return
 		end
 
-		local cost = self.CardCosts[self.DrakeCardIndex]
+		local monster = self:GetMonsterByCardIndex(self.EnemyFixedCardIndex)
+		if monster == nil then
+			log_error("[ThreeLaneBoard][EnemyPlan] Turn 3 card data unavailable")
+			return
+		end
+		local cost = monster.Cost
 		if self.EnemyCurrentCost < cost then
-			log_error("[ThreeLaneBoard][EnemyPlan] Turn 3 Drake cost unavailable")
+			log_error("[ThreeLaneBoard][EnemyPlan] Turn 3 Yeti cost unavailable")
 			return
 		end
 
@@ -761,7 +839,9 @@ script ThreeLaneBoard extends Component
 			self.EnemyPendingPlacements,
 			{
 				Order = 1,
-				CardIndex = self.DrakeCardIndex,
+				CardIndex = self.EnemyFixedCardIndex,
+				MonsterId = monster.MonsterId,
+				Cost = cost,
 				SlotIndex = self.EnemyFixedSlotIndex,
 				Position = slot.TransformComponent.WorldPosition,
 				OwnerUserId = "EnemyAI",
@@ -771,7 +851,9 @@ script ThreeLaneBoard extends Component
 		self.EnemyPendingCount = 1
 		log(
 			"[ThreeLaneBoard][EnemyPlan] Turn=3 precommitted before player input"
-			.. ", Card=5, Slot=8, Cost=6->"
+				.. ", Card=5, MonsterId="
+				.. monster.MonsterId
+				.. ", Slot=8, Cost=6->"
 			.. tostring(self.EnemyCurrentCost)
 		)
 	end
@@ -872,6 +954,9 @@ script ThreeLaneBoard extends Component
 			and self.CurrentCost == 6
 			and self.EnemyCurrentCost == 1
 			and self.EnemyPendingCount == 1
+			and self.EnemyPendingPlacements[1] ~= nil
+			and self.EnemyPendingPlacements[1].CardIndex == 5
+			and self.EnemyPendingPlacements[1].MonsterId == "yeti"
 		allPassed = self:RecordMakerRegression("IndependentEnemyTurn3Plan", enemyPlan) and allPassed
 
 		self:ResetBattle()
@@ -925,6 +1010,138 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2C2DataRegression()
+		-- 기본 7종을 실제 프로토타입 모델로 소환해 MonsterData 전달 계약을 전부 비교한다.
+		local combat = self:GetCombat()
+		local data = self:GetData()
+		if not isvalid(combat) or not isvalid(data) then
+			log_error("[Phase2C2][DATA][ALL] FAIL - combat or data component missing")
+			return false
+		end
+
+		combat.MakerHarnessRunning = true
+		self:ResetBattle()
+		local allPassed = true
+		local map = self.Entity.CurrentMap
+		local expectedIds = {
+			"slime",
+			"ribbon_pig",
+			"green_mushroom",
+			"stone_golem",
+			"yeti",
+			"junior_balrog",
+			"pink_bean"
+		}
+		local meleeCount = 0
+		local rangedCount = 0
+
+		allPassed = self:RecordPhase2C2Regression(
+			"DataCounts",
+			data.MonsterCount == 13 and data.GradeRuleCount == 5
+		) and allPassed
+
+		for cardIndex = 1, 7 do
+			local monster = data:GetMonsterByCardIndex(cardIndex)
+			local slot = nil
+			if isvalid(map) then
+				slot = map:GetChildByName("PlayerSlot_" .. tostring(cardIndex))
+			end
+			local mappingPassed = monster ~= nil
+				and monster.MonsterId == expectedIds[cardIndex]
+				and isvalid(slot)
+			allPassed = self:RecordPhase2C2Regression(
+				"CardMap" .. tostring(cardIndex),
+				mappingPassed
+			) and allPassed
+
+			if mappingPassed then
+				local beforeCount = #combat.Units
+				self:SpawnPlacement(
+					{
+						Order = cardIndex,
+						CardIndex = cardIndex,
+						MonsterId = monster.MonsterId,
+						Cost = monster.Cost,
+						SlotIndex = cardIndex,
+						Position = slot.TransformComponent.WorldPosition,
+						OwnerUserId = "Phase2C2Regression",
+						OwnerSide = 1
+					}
+				)
+				local unit = combat.Units[beforeCount + 1]
+				local spawnPassed = self:IsSpawnDataMatch(unit, monster)
+				allPassed = self:RecordPhase2C2Regression(
+					"SpawnData" .. tostring(cardIndex),
+					spawnPassed
+				) and allPassed
+
+				if monster.RangeClass == "Melee" then
+					meleeCount = meleeCount + 1
+				elseif monster.RangeClass == "Ranged" then
+					rangedCount = rangedCount + 1
+				end
+			end
+		end
+
+		allPassed = self:RecordPhase2C2Regression(
+			"RangeClassCounts",
+			meleeCount == 4 and rangedCount == 3
+		) and allPassed
+
+		local yeti = data:GetMonsterById("yeti")
+		local yetiPassed = yeti ~= nil
+			and yeti.CardIndex == 5
+			and yeti.Cost == 5
+			and yeti.HP == 550
+			and yeti.Attack == 135
+			and yeti.AttackIntervalTicks == 90
+			and yeti.FirstAttackDelayTicks == 18
+			and yeti.NexusDamage == 8
+			and yeti.Cost ~= yeti.NexusDamage
+		allPassed = self:RecordPhase2C2Regression("YetiCost5Nexus8", yetiPassed) and allPassed
+
+		self:ResetBattle()
+		combat.MakerHarnessRunning = false
+		if allPassed then
+			log("[Phase2C2][DATA][ALL] PASS - 7 actual spawns restored to normal play")
+		else
+			log_error("[Phase2C2][DATA][ALL] FAIL - see item logs")
+		end
+		return allPassed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsSpawnDataMatch(any unit, any monster)
+		-- 실제 ThreeLaneUnit에 전달된 모든 Phase 2C-2 필드를 원본 행과 비교한다.
+		if unit == nil or not isvalid(unit) or monster == nil then
+			return false
+		end
+		return unit.MonsterId == monster.MonsterId
+			and unit.CardIndex == monster.CardIndex
+			and unit.Cost == monster.Cost
+			and unit.HP == monster.HP
+			and unit.MaxHP == monster.HP
+			and unit.Attack == monster.Attack
+			and unit.AttackIntervalTicks == monster.AttackIntervalTicks
+			and unit.FirstAttackDelayTicks == monster.FirstAttackDelayTicks
+			and math.abs(unit.MoveSpeed - monster.MoveSpeed) <= 0.000001
+			and unit.RangeClass == monster.RangeClass
+			and math.abs(unit.AttackRange - monster.AttackRange) <= 0.000001
+			and unit.NexusDamage == monster.NexusDamage
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RecordPhase2C2Regression(string name, boolean passed)
+		-- Phase 2C-2 데이터 항목별 결과를 독립 로그 접두사로 기록한다.
+		if passed then
+			log("[Phase2C2][DATA][" .. name .. "] PASS")
+		else
+			log_error("[Phase2C2][DATA][" .. name .. "] FAIL")
+		end
+		return passed
+	end
+
+	@ExecSpace("ServerOnly")
 	method void ClearSlots()
 		-- 15개 플레이어 슬롯의 점유 상태와 기본 색을 복구한다.
 		local map = self.Entity.CurrentMap
@@ -959,13 +1176,17 @@ script ThreeLaneBoard extends Component
 		self.UsedCardMask = mask
 	end
 
+	@ExecSpace("ServerOnly")
 	method integer GetCardCost(integer cardIndex)
-		-- 카드 번호의 코스트를 반환한다. 범위를 벗어나면 0을 반환한다.
+		-- 카드 번호의 MonsterData Cost를 반환한다. 범위를 벗어나거나 데이터가 없으면 0이다.
 		if cardIndex < 1 or cardIndex > 7 then
 			return 0
 		end
-
-		return self.CardCosts[cardIndex]
+		local monster = self:GetMonsterByCardIndex(cardIndex)
+		if monster == nil then
+			return 0
+		end
+		return monster.Cost
 	end
 
 end
