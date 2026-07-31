@@ -1,0 +1,6 @@
+﻿StatKey,DisplayNameKey,Direction,Boundary12,Boundary23,Boundary34,Boundary45,SourceUnit,Version
+HP,stat.hp,HigherIsBetter,300,500,700,900,point,v0.2
+Attack,stat.attack,HigherIsBetter,75,105,135,165,point,v0.2
+AttackInterval,stat.attack_speed,LowerIsBetter,0.95,1.11,1.33,1.65,second,v0.2
+MoveSpeed,stat.move_speed,HigherIsBetter,0.78,0.93,1.08,1.23,world_unit_per_second,v0.2
+NexusDamage,stat.nexus_damage,HigherIsBetter,2,4,6,8,point,v0.2

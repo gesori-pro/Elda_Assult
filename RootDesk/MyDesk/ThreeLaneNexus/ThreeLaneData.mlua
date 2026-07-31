@@ -1,0 +1,397 @@
+@Component
+script ThreeLaneData extends Component
+
+	property boolean IsReady = false
+
+	property integer MonsterCount = 0
+
+	property integer GradeRuleCount = 0
+
+	property table MonsterById = {}
+
+	property table MonsterByCardIndex = {}
+
+	property table GradeRuleByStat = {}
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- MonsterData와 StatGradeRule을 읽어 Phase 2C-1 데이터 원본을 검증한다.
+		log("[ThreeLaneData] OnBeginPlay - loading datasets")
+		self:LoadAndValidate()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean LoadAndValidate()
+		-- 두 UserDataSet을 캐시에 적재하고 행 수·키·수치·등급 기준 불변식을 검사한다.
+		self.IsReady = false
+		self.MonsterCount = 0
+		self.GradeRuleCount = 0
+		self.MonsterById = {}
+		self.MonsterByCardIndex = {}
+		self.GradeRuleByStat = {}
+
+		local monsterData = _DataService:GetTable("MonsterData")
+		if monsterData == nil then
+			log_error("[ThreeLaneData][FAIL] MonsterData dataset not found")
+			return false
+		end
+
+		local gradeData = _DataService:GetTable("StatGradeRule")
+		if gradeData == nil then
+			log_error("[ThreeLaneData][FAIL] StatGradeRule dataset not found")
+			return false
+		end
+
+		local monsterRows = monsterData:GetAllRow()
+		for rowIndex, row in ipairs(monsterRows) do
+			local monster = self:ParseMonsterRow(row)
+			if not self:ValidateMonsterRow(monster, rowIndex) then
+				return false
+			end
+
+			if self.MonsterById[monster.MonsterId] ~= nil then
+				log_error("[ThreeLaneData][FAIL] duplicate MonsterId=" .. monster.MonsterId)
+				return false
+			end
+
+			self.MonsterById[monster.MonsterId] = monster
+			if monster.CardIndex > 0 then
+				if self.MonsterByCardIndex[monster.CardIndex] ~= nil then
+					log_error(
+						"[ThreeLaneData][FAIL] duplicate CardIndex=" .. tostring(monster.CardIndex)
+					)
+					return false
+				end
+				self.MonsterByCardIndex[monster.CardIndex] = monster
+			end
+
+			self.MonsterCount = self.MonsterCount + 1
+			log(
+				"[ThreeLaneData][Monster] Id="
+				.. monster.MonsterId
+				.. ", Card="
+				.. tostring(monster.CardIndex)
+				.. ", Cost="
+				.. tostring(monster.Cost)
+				.. ", HP="
+				.. tostring(monster.HP)
+				.. ", Attack="
+				.. tostring(monster.Attack)
+			)
+		end
+
+		if self.MonsterCount ~= 13 then
+			log_error(
+				"[ThreeLaneData][FAIL] MonsterData row count expected=13 actual="
+				.. tostring(self.MonsterCount)
+			)
+			return false
+		end
+
+		for cardIndex = 1, 7 do
+			if self.MonsterByCardIndex[cardIndex] == nil then
+				log_error(
+					"[ThreeLaneData][FAIL] M1 card mapping missing CardIndex=" .. tostring(cardIndex)
+				)
+				return false
+			end
+		end
+
+		local gradeRows = gradeData:GetAllRow()
+		for rowIndex, row in ipairs(gradeRows) do
+			local rule = self:ParseGradeRule(row)
+			if not self:ValidateGradeRule(rule, rowIndex) then
+				return false
+			end
+
+			if self.GradeRuleByStat[rule.StatKey] ~= nil then
+				log_error("[ThreeLaneData][FAIL] duplicate StatKey=" .. rule.StatKey)
+				return false
+			end
+
+			self.GradeRuleByStat[rule.StatKey] = rule
+			self.GradeRuleCount = self.GradeRuleCount + 1
+			log(
+				"[ThreeLaneData][GradeRule] Stat="
+				.. rule.StatKey
+				.. ", Direction="
+				.. rule.Direction
+				.. ", Boundaries="
+				.. tostring(rule.Boundary12)
+				.. "/"
+				.. tostring(rule.Boundary23)
+				.. "/"
+				.. tostring(rule.Boundary34)
+				.. "/"
+				.. tostring(rule.Boundary45)
+			)
+		end
+
+		if self.GradeRuleCount ~= 5 then
+			log_error(
+				"[ThreeLaneData][FAIL] StatGradeRule row count expected=5 actual="
+				.. tostring(self.GradeRuleCount)
+			)
+			return false
+		end
+
+		if not self:ValidateDrakeReference() then
+			return false
+		end
+
+		self.IsReady = true
+		log(
+			"[ThreeLaneData][PASS] Monsters="
+			.. tostring(self.MonsterCount)
+			.. ", GradeRules="
+			.. tostring(self.GradeRuleCount)
+			.. ", DrakeGrades=3/3/3/3/3"
+		)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method any ParseMonsterRow(any row)
+		-- CSV 문자열 행을 이후 전투 코드가 사용할 명시적 타입의 몬스터 테이블로 변환한다.
+		return {
+			MonsterId = row:GetItem("MonsterId") or "",
+			CardIndex = tonumber(row:GetItem("CardIndex")) or 0,
+			DevName = row:GetItem("DevName") or "",
+			NameKey = row:GetItem("NameKey") or "",
+			ResourcePack = row:GetItem("ResourcePack") or "",
+			PoolStatus = row:GetItem("PoolStatus") or "",
+			Cost = tonumber(row:GetItem("Cost")) or 0,
+			BaseStatTier = tonumber(row:GetItem("BaseStatTier")) or 0,
+			HP = tonumber(row:GetItem("HP")) or 0,
+			Attack = tonumber(row:GetItem("Attack")) or 0,
+			AttackInterval = tonumber(row:GetItem("AttackInterval")) or 0,
+			AttackIntervalTicks = tonumber(row:GetItem("AttackIntervalTicks")) or 0,
+			FirstAttackDelay = tonumber(row:GetItem("FirstAttackDelay")) or 0,
+			FirstAttackDelayTicks = tonumber(row:GetItem("FirstAttackDelayTicks")) or 0,
+			MoveSpeed = tonumber(row:GetItem("MoveSpeed")) or 0,
+			RangeClass = row:GetItem("RangeClass") or "",
+			AttackRange = tonumber(row:GetItem("AttackRange")) or 0,
+			NexusDamage = tonumber(row:GetItem("NexusDamage")) or 0,
+			TargetingRule = row:GetItem("TargetingRule") or "",
+			SecondaryTargetLane = row:GetItem("SecondaryTargetLane") or "",
+			SecondaryDamage = tonumber(row:GetItem("SecondaryDamage")) or 0,
+			EffectType = row:GetItem("EffectType") or "",
+			EffectValue = tonumber(row:GetItem("EffectValue")) or 0,
+			EffectValue2 = tonumber(row:GetItem("EffectValue2")) or 0,
+			EffectTarget = row:GetItem("EffectTarget") or "",
+			EffectMaxTargets = tonumber(row:GetItem("EffectMaxTargets")) or 0,
+			EffectDuration = row:GetItem("EffectDuration") or "",
+			EffectTextKey = row:GetItem("EffectTextKey") or "",
+			RoleTextKey = row:GetItem("RoleTextKey") or "",
+			DescriptionTextKey = row:GetItem("DescriptionTextKey") or "",
+			Rarity = row:GetItem("Rarity") or ""
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidateMonsterRow(any monster, integer rowIndex)
+		-- 필수 키·전투 수치·60Hz Tick 환산이 올바른지 한 행씩 검증한다.
+		if monster.MonsterId == "" or monster.NameKey == "" then
+			log_error("[ThreeLaneData][FAIL] missing monster key at row " .. tostring(rowIndex))
+			return false
+		end
+
+		if monster.Cost <= 0
+			or monster.HP <= 0
+			or monster.Attack <= 0
+			or monster.AttackInterval <= 0
+			or monster.MoveSpeed <= 0
+			or monster.AttackRange <= 0
+			or monster.NexusDamage <= 0 then
+			log_error("[ThreeLaneData][FAIL] non-positive combat stat Id=" .. monster.MonsterId)
+			return false
+		end
+
+		if monster.RangeClass ~= "Melee" and monster.RangeClass ~= "Ranged" then
+			log_error("[ThreeLaneData][FAIL] invalid RangeClass Id=" .. monster.MonsterId)
+			return false
+		end
+
+		local expectedAttackTicks = math.floor(monster.AttackInterval * 60 + 0.5)
+		local expectedFirstTicks = math.floor(monster.FirstAttackDelay * 60 + 0.5)
+		if monster.AttackIntervalTicks ~= expectedAttackTicks
+			or monster.FirstAttackDelayTicks ~= expectedFirstTicks then
+			log_error(
+				"[ThreeLaneData][FAIL] tick conversion mismatch Id="
+				.. monster.MonsterId
+				.. ", AttackTicks="
+				.. tostring(monster.AttackIntervalTicks)
+				.. "/"
+				.. tostring(expectedAttackTicks)
+				.. ", FirstTicks="
+				.. tostring(monster.FirstAttackDelayTicks)
+				.. "/"
+				.. tostring(expectedFirstTicks)
+			)
+			return false
+		end
+
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method any ParseGradeRule(any row)
+		-- StatGradeRule 문자열 행을 방향과 네 경계값을 가진 테이블로 변환한다.
+		return {
+			StatKey = row:GetItem("StatKey") or "",
+			DisplayNameKey = row:GetItem("DisplayNameKey") or "",
+			Direction = row:GetItem("Direction") or "",
+			Boundary12 = tonumber(row:GetItem("Boundary12")) or 0,
+			Boundary23 = tonumber(row:GetItem("Boundary23")) or 0,
+			Boundary34 = tonumber(row:GetItem("Boundary34")) or 0,
+			Boundary45 = tonumber(row:GetItem("Boundary45")) or 0,
+			SourceUnit = row:GetItem("SourceUnit") or "",
+			Version = row:GetItem("Version") or ""
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidateGradeRule(any rule, integer rowIndex)
+		-- 등급 방향과 네 경계가 오름차순인지 검증한다.
+		if rule.StatKey == "" or rule.DisplayNameKey == "" then
+			log_error("[ThreeLaneData][FAIL] missing grade key at row " .. tostring(rowIndex))
+			return false
+		end
+
+		if rule.Direction ~= "HigherIsBetter" and rule.Direction ~= "LowerIsBetter" then
+			log_error("[ThreeLaneData][FAIL] invalid grade direction Stat=" .. rule.StatKey)
+			return false
+		end
+
+		if not (rule.Boundary12 < rule.Boundary23
+			and rule.Boundary23 < rule.Boundary34
+			and rule.Boundary34 < rule.Boundary45) then
+			log_error("[ThreeLaneData][FAIL] unordered grade boundaries Stat=" .. rule.StatKey)
+			return false
+		end
+
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer CalculateGrade(string statKey, number value)
+		-- 고정 경계 규칙을 사용해 매우 낮음 1부터 매우 높음 5까지의 등급을 계산한다.
+		local rule = self.GradeRuleByStat[statKey]
+		if rule == nil then
+			return 0
+		end
+
+		if rule.Direction == "LowerIsBetter" then
+			if value < rule.Boundary12 then
+				return 5
+			end
+			if value < rule.Boundary23 then
+				return 4
+			end
+			if value < rule.Boundary34 then
+				return 3
+			end
+			if value < rule.Boundary45 then
+				return 2
+			end
+			return 1
+		end
+
+		if value < rule.Boundary12 then
+			return 1
+		end
+		if value < rule.Boundary23 then
+			return 2
+		end
+		if value < rule.Boundary34 then
+			return 3
+		end
+		if value < rule.Boundary45 then
+			return 4
+		end
+		return 5
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetGradeTextKey(integer grade)
+		-- 등급 숫자를 이후 LocaleDataSet에서 사용할 공통 텍스트 키로 변환한다.
+		if grade == 1 then
+			return "grade.very_low"
+		end
+		if grade == 2 then
+			return "grade.low"
+		end
+		if grade == 3 then
+			return "grade.normal"
+		end
+		if grade == 4 then
+			return "grade.high"
+		end
+		if grade == 5 then
+			return "grade.very_high"
+		end
+		return "grade.unknown"
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetMonsterById(string monsterId)
+		-- 캐시에서 MonsterId와 일치하는 변환 완료 몬스터 데이터를 반환한다.
+		return self.MonsterById[monsterId]
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetMonsterByCardIndex(integer cardIndex)
+		-- M1 기본 카드 인덱스와 연결된 몬스터 데이터를 반환한다.
+		return self.MonsterByCardIndex[cardIndex]
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidateDrakeReference()
+		-- 드레이크 실제 수치와 다섯 표시 등급이 모두 GDD 기준값 보통 3인지 검증한다.
+		local drake = self.MonsterById["drake"]
+		if drake == nil then
+			log_error("[ThreeLaneData][FAIL] drake reference row missing")
+			return false
+		end
+
+		if drake.Cost ~= 5
+			or drake.HP ~= 600
+			or drake.Attack ~= 120
+			or drake.AttackIntervalTicks ~= 72
+			or drake.FirstAttackDelayTicks ~= 18
+			or math.abs(drake.MoveSpeed - 1.0) > 0.000001
+			or math.abs(drake.AttackRange - 0.70) > 0.000001
+			or drake.NexusDamage ~= 5 then
+			log_error("[ThreeLaneData][FAIL] drake reference stats mismatch")
+			return false
+		end
+
+		local hpGrade = self:CalculateGrade("HP", drake.HP)
+		local attackGrade = self:CalculateGrade("Attack", drake.Attack)
+		local intervalGrade = self:CalculateGrade("AttackInterval", drake.AttackInterval)
+		local moveGrade = self:CalculateGrade("MoveSpeed", drake.MoveSpeed)
+		local nexusGrade = self:CalculateGrade("NexusDamage", drake.NexusDamage)
+		if hpGrade ~= 3
+			or attackGrade ~= 3
+			or intervalGrade ~= 3
+			or moveGrade ~= 3
+			or nexusGrade ~= 3 then
+			log_error(
+				"[ThreeLaneData][FAIL] drake grades="
+				.. tostring(hpGrade)
+				.. "/"
+				.. tostring(attackGrade)
+				.. "/"
+				.. tostring(intervalGrade)
+				.. "/"
+				.. tostring(moveGrade)
+				.. "/"
+				.. tostring(nexusGrade)
+			)
+			return false
+		end
+
+		return true
+	end
+
+end
