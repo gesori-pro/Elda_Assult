@@ -721,7 +721,7 @@
       {
         "id": "bcd01b24-2346-4df5-8fc3-8860fabc2215",
         "path": "/maps/map01/PrototypeBoard",
-        "componentNames": "MOD.Core.TransformComponent,script.ThreeLaneBoard",
+        "componentNames": "MOD.Core.TransformComponent,script.ThreeLaneBoard,script.ThreeLaneCombat",
         "jsonString": {
           "name": "PrototypeBoard",
           "path": "/maps/map01/PrototypeBoard",
@@ -768,6 +768,10 @@
               "EnemyNexusHp": 30,
               "BattleState": "Playing",
               "UnitModelId": "threelaneprototypeunit"
+            },
+            {
+              "Enable": true,
+              "@type": "script.ThreeLaneCombat"
             }
           ],
           "@version": 1
@@ -992,7 +996,7 @@
           "name": "PrototypeRestart",
           "path": "/maps/map01/PrototypeRestart",
           "nameEditable": true,
-          "enable": true,
+          "enable": false,
           "visible": false,
           "localize": false,
           "displayOrder": 11,

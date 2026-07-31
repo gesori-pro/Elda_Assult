@@ -3,6 +3,8 @@ script ThreeLaneHUD extends Component
 
 	property TextGUIRendererComponent TurnText = "9a1e9c4c-8e19-4907-a37e-414b6d65d72a"
 
+	property TextGUIRendererComponent PhaseText = "b6d84341-179a-4593-b910-fbf29c00370b"
+
 	property TextGUIRendererComponent TimerText = "71ca757a-45c9-41a2-b7bb-b04b7aaef8a8"
 
 	property TextGUIRendererComponent PlayerHpText = "2172aeda-fb50-4b8b-b646-8efd6973606c"
@@ -14,6 +16,14 @@ script ThreeLaneHUD extends Component
 	property TextGUIRendererComponent CardHintText = "48ffe959-0e3c-4c8e-8351-78450d476a22"
 
 	property Entity RestartButton = "9200f53f-74c8-4a81-99d6-d490a6bc4a2e"
+
+	property Entity ConfirmButton = "c87b6ec8-c48d-4b2d-a65a-378f77691044"
+
+	property Entity CancelButton = "fa48af91-1e96-4a45-9cce-76a367034251"
+
+	property Entity Speed1Button = "137a029c-eadf-45f1-b833-71a3de249b6b"
+
+	property Entity Speed2Button = "246cba26-1db6-4cb4-81f9-03bfe017a60f"
 
 	property Entity Card1 = "55de8a28-8fbb-4aa6-90b7-1c509b00f9b2"
 
@@ -33,7 +43,11 @@ script ThreeLaneHUD extends Component
 
 	property TextGUIRendererComponent DragGhostText = "150be69f-1580-4e61-b204-6994137a3026"
 
+	property table CardCosts = { 1, 2, 3, 4, 5, 6, 8 }
+
 	property integer SelectedCardIndex = 0
+
+	property integer SelectedReservedSlot = 0
 
 	property integer ActiveCardIndex = 0
 
@@ -61,11 +75,19 @@ script ThreeLaneHUD extends Component
 
 	property any RestartHandler = nil
 
+	property any ConfirmHandler = nil
+
+	property any CancelHandler = nil
+
+	property any Speed1Handler = nil
+
+	property any Speed2Handler = nil
+
 	property number RefreshAccumulator = 0
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
-		-- 카드 입력과 기존 HUD 버튼을 한 번만 연결한다.
+		-- 카드 입력과 확정·재시작 버튼을 한 번만 연결한다.
 		self.CardEntities = {
 			self.Card1,
 			self.Card2,
@@ -110,13 +132,41 @@ script ThreeLaneHUD extends Component
 			)
 		end
 
+		if isvalid(self.ConfirmButton) then
+			self.ConfirmHandler = self.ConfirmButton:ConnectEvent(
+				ButtonClickEvent,
+				self.OnConfirmClicked
+			)
+		end
+
+		if isvalid(self.CancelButton) then
+			self.CancelHandler = self.CancelButton:ConnectEvent(
+				ButtonClickEvent,
+				self.OnCancelClicked
+			)
+		end
+
+		if isvalid(self.Speed1Button) then
+			self.Speed1Handler = self.Speed1Button:ConnectEvent(
+				ButtonClickEvent,
+				self.OnSpeed1Clicked
+			)
+		end
+
+		if isvalid(self.Speed2Button) then
+			self.Speed2Handler = self.Speed2Button:ConnectEvent(
+				ButtonClickEvent,
+				self.OnSpeed2Clicked
+			)
+		end
+
 		if isvalid(self.DragGhost) then
 			self.DragGhost.Enable = false
 		end
 
-		self:SetCardHint("클릭: 선택 후 슬롯 터치  ·  드래그: 가까운 슬롯에 놓기")
+		self:SetCardHint("배치 단계 · 카드를 고른 뒤 슬롯을 터치하거나 드래그하세요.")
 		self:RefreshHud()
-		log("[ThreeLaneHUD] OnBeginPlay - card click and magnetic drag ready")
+		log("[ThreeLaneHUD] OnBeginPlay - phase HUD, cost gating and confirm button ready")
 	end
 
 	@ExecSpace("ClientOnly")
@@ -153,25 +203,56 @@ script ThreeLaneHUD extends Component
 			self.RestartHandler = nil
 		end
 
+		if isvalid(self.ConfirmButton) and self.ConfirmHandler ~= nil then
+			self.ConfirmButton:DisconnectEvent(ButtonClickEvent, self.ConfirmHandler)
+			self.ConfirmHandler = nil
+		end
+
+		if isvalid(self.CancelButton) and self.CancelHandler ~= nil then
+			self.CancelButton:DisconnectEvent(ButtonClickEvent, self.CancelHandler)
+			self.CancelHandler = nil
+		end
+
+		if isvalid(self.Speed1Button) and self.Speed1Handler ~= nil then
+			self.Speed1Button:DisconnectEvent(ButtonClickEvent, self.Speed1Handler)
+			self.Speed1Handler = nil
+		end
+
+		if isvalid(self.Speed2Button) and self.Speed2Handler ~= nil then
+			self.Speed2Button:DisconnectEvent(ButtonClickEvent, self.Speed2Handler)
+			self.Speed2Handler = nil
+		end
+
 		self:ClearSnapTarget()
 	end
 
 	@ExecSpace("ClientOnly")
-	method void RefreshHud()
-		-- 현재 맵의 보드 컴포넌트에서 동기화된 HUD 데이터를 읽는다.
+	method ThreeLaneBoard GetBoard()
+		-- 현재 맵의 전투 보드 컴포넌트를 찾아 반환한다. 없으면 nil을 반환한다.
 		local localPlayer = _UserService.LocalPlayer
 		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
-			return
+			return nil
 		end
 
 		local boardEntity = localPlayer.CurrentMap:GetChildByName("PrototypeBoard")
 		if not isvalid(boardEntity) then
-			return
+			return nil
 		end
 
 		---@type ThreeLaneBoard
 		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
 		if not isvalid(board) then
+			return nil
+		end
+
+		return board
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshHud()
+		-- 서버가 동기화한 턴·페이즈·코스트·전투 시간을 화면에 반영한다.
+		local board = self:GetBoard()
+		if board == nil then
 			return
 		end
 
@@ -179,9 +260,19 @@ script ThreeLaneHUD extends Component
 			self.TurnText.Text = tostring(board.TurnNumber) .. "턴"
 		end
 
+		if isvalid(self.PhaseText) then
+			self.PhaseText.Text = self:GetPhaseLabel(board)
+		end
+
 		if isvalid(self.TimerText) then
-			local seconds = math.ceil(board.RemainingTime)
-			self.TimerText.Text = "남은 시간  " .. tostring(seconds) .. "초"
+			if board.BattleState ~= "Playing" then
+				self.TimerText.Text = "전투 종료"
+			elseif board.Phase == "Battle" then
+				local seconds = math.ceil(board.BattleRemaining)
+				self.TimerText.Text = "전투 시간  " .. tostring(seconds) .. "초"
+			else
+				self.TimerText.Text = "전투 대기"
+			end
 		end
 
 		if isvalid(self.PlayerHpText) then
@@ -199,7 +290,257 @@ script ThreeLaneHUD extends Component
 				.. tostring(board.MaxCost)
 		end
 
-		self:RefreshCardVisuals(board.UsedCardMask)
+		self:ValidateReservedSelection(board)
+		self:RefreshConfirmVisual(board)
+		self:RefreshCancelVisual(board)
+		self:RefreshSpeedVisual(board)
+		self:RefreshCardVisuals(board)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSlotEntity(integer slotIndex)
+		-- 슬롯 번호로 현재 맵의 플레이어 슬롯 엔티티를 찾는다.
+		if slotIndex < 1 or slotIndex > 15 then
+			return nil
+		end
+
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+			return nil
+		end
+
+		return localPlayer.CurrentMap:GetChildByName("PlayerSlot_" .. tostring(slotIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectReservedSlot(Entity slotEntity)
+		-- 예약된 슬롯을 눌러 취소 대상으로 선택한다. 같은 슬롯을 다시 누르면 선택을 해제한다.
+		local board = self:GetBoard()
+		if board == nil then
+			return
+		end
+
+		if board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
+			self:SetCardHint("배치 단계에서만 예약을 취소할 수 있습니다.")
+			return
+		end
+
+		---@type ThreeLaneSlot
+		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(slot) or not slot.IsOccupied then
+			return
+		end
+
+		if self.SelectedReservedSlot == slot.SlotIndex then
+			self:ClearReservedSelection()
+			self:SetCardHint("예약 선택을 해제했습니다.")
+			log("[ThreeLaneHUD] Reservation deselected - Slot=" .. tostring(slot.SlotIndex))
+			return
+		end
+
+		self:ClearReservedSelection()
+		self.SelectedReservedSlot = slot.SlotIndex
+		self.SelectedCardIndex = 0
+		self:ApplyReservedHighlight()
+		self:SetCardHint(
+			"예약 선택: 슬롯 "
+				.. tostring(slot.SlotIndex)
+				.. " · 버튼이 `슬롯 "
+				.. tostring(slot.SlotIndex)
+				.. " 취소`로 바뀝니다. 다시 누르면 선택 해제"
+		)
+		log("[ThreeLaneHUD] Reservation selected - Slot=" .. tostring(slot.SlotIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyReservedHighlight()
+		-- 선택된 예약 슬롯을 눈에 띄는 주황색으로 강조한다.
+		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
+		if isvalid(slotEntity) and isvalid(slotEntity.SpriteRendererComponent) then
+			slotEntity.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.20, 1.0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearReservedSelection()
+		-- 예약 선택을 해제하고 슬롯 색을 점유 상태 기본색으로 되돌린다.
+		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
+		if isvalid(slotEntity) and isvalid(slotEntity.SpriteRendererComponent) then
+			---@type ThreeLaneSlot
+			local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+			if isvalid(slot) and slot.IsOccupied then
+				slotEntity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
+			end
+		end
+
+		self.SelectedReservedSlot = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ValidateReservedSelection(ThreeLaneBoard board)
+		-- 페이즈가 바뀌거나 예약이 사라지면 선택 상태를 자동으로 정리한다.
+		if self.SelectedReservedSlot == 0 then
+			return
+		end
+
+		if board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
+			self:ClearReservedSelection()
+			return
+		end
+
+		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
+		if not isvalid(slotEntity) then
+			self.SelectedReservedSlot = 0
+			return
+		end
+
+		---@type ThreeLaneSlot
+		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(slot) or not slot.IsOccupied then
+			self.SelectedReservedSlot = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCancelVisual(ThreeLaneBoard board)
+		-- 예약이 하나라도 있으면 버튼을 활성화한다. 선택이 없으면 마지막 예약 되돌리기로 동작한다.
+		if not isvalid(self.CancelButton) then
+			return
+		end
+
+		local usable = board.BattleState == "Playing"
+			and board.Phase == "Placement"
+			and board.PendingCount > 0
+
+		if isvalid(self.CancelButton.ButtonComponent) then
+			self.CancelButton.ButtonComponent.Enable = usable
+		end
+
+		if isvalid(self.CancelButton.TextGUIRendererComponent) then
+			if self.SelectedReservedSlot ~= 0 then
+				self.CancelButton.TextGUIRendererComponent.Text =
+					"슬롯 " .. tostring(self.SelectedReservedSlot) .. " 취소"
+			else
+				self.CancelButton.TextGUIRendererComponent.Text =
+					"되돌리기 (" .. tostring(board.PendingCount) .. ")"
+			end
+		end
+
+		if isvalid(self.CancelButton.SpriteGUIRendererComponent) then
+			if usable then
+				self.CancelButton.SpriteGUIRendererComponent.Color = Color(0.68, 0.24, 0.24, 1.0)
+			else
+				self.CancelButton.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.7)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCancelClicked(ButtonClickEvent event)
+		-- 선택한 예약이 있으면 그 예약을, 없으면 마지막 예약을 되돌린다.
+		local board = self:GetBoard()
+		if board == nil then
+			log_error("[ThreeLaneHUD] Cancel failed - board not found")
+			return
+		end
+
+		if board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
+			self:SetCardHint("배치 단계에서만 예약을 되돌릴 수 있습니다.")
+			return
+		end
+
+		if board.PendingCount <= 0 then
+			self:SetCardHint("되돌릴 예약 배치가 없습니다.")
+			return
+		end
+
+		if self.SelectedReservedSlot ~= 0 then
+			local slotIndex = self.SelectedReservedSlot
+			self:ClearReservedSelection()
+			board:RequestCancelPlacement(slotIndex)
+			self:SetCardHint(
+				"슬롯 " .. tostring(slotIndex) .. " 예약을 취소했습니다. 카드를 다시 쓸 수 있습니다."
+			)
+			log("[ThreeLaneHUD] Cancel requested - Slot=" .. tostring(slotIndex))
+			return
+		end
+
+		self:ClearReservedSelection()
+		board:RequestUndoPlacement()
+		self:SetCardHint("마지막 배치를 되돌렸습니다. 코스트가 환불됩니다.")
+		log("[ThreeLaneHUD] Undo requested - Pending=" .. tostring(board.PendingCount))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetPhaseLabel(ThreeLaneBoard board)
+		-- 현재 전투 상태와 페이즈를 한 줄 안내 문구로 변환한다.
+		if board.BattleState == "Victory" then
+			return "승리 · 재시작 가능"
+		end
+
+		if board.BattleState == "Defeat" then
+			return "패배 · 재시작 가능"
+		end
+
+		if board.BattleState == "Draw" then
+			return "무승부 · 재시작 가능"
+		end
+
+		if board.Phase == "Placement" then
+			return "배치 단계 (" .. tostring(board.PendingCount) .. "기 대기)"
+		end
+
+		if board.Phase == "Reveal" then
+			return "공개 단계"
+		end
+
+		if board.Phase == "Battle" then
+			return "전투 단계"
+		end
+
+		return "정산 단계"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshConfirmVisual(ThreeLaneBoard board)
+		-- 배치 단계에서만 확정 버튼을 강조하고 그 외에는 흐리게 표시한다.
+		if not isvalid(self.ConfirmButton) then
+			return
+		end
+
+		if not isvalid(self.ConfirmButton.SpriteGUIRendererComponent) then
+			return
+		end
+
+		if board.BattleState == "Playing" and board.Phase == "Placement" then
+			self.ConfirmButton.SpriteGUIRendererComponent.Color = Color(0.16, 0.55, 0.32, 1.0)
+		else
+			self.ConfirmButton.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.7)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSpeedVisual(ThreeLaneBoard board)
+		-- 현재 선택된 배속 버튼을 항상 밝게 표시해 전투·대기 중 상태를 구분한다.
+		if isvalid(self.Speed1Button) and isvalid(self.Speed1Button.SpriteGUIRendererComponent) then
+			if board.SimSpeed == 1 then
+				self.Speed1Button.SpriteGUIRendererComponent.Color = Color(1.0, 0.80, 0.28, 1.0)
+				self.Speed1Button.TextGUIRendererComponent.FontColor = Color(0.10, 0.14, 0.19, 1.0)
+			else
+				self.Speed1Button.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.88)
+				self.Speed1Button.TextGUIRendererComponent.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			end
+		end
+
+		if isvalid(self.Speed2Button) and isvalid(self.Speed2Button.SpriteGUIRendererComponent) then
+			if board.SimSpeed == 2 then
+				self.Speed2Button.SpriteGUIRendererComponent.Color = Color(1.0, 0.80, 0.28, 1.0)
+				self.Speed2Button.TextGUIRendererComponent.FontColor = Color(0.10, 0.14, 0.19, 1.0)
+			else
+				self.Speed2Button.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.88)
+				self.Speed2Button.TextGUIRendererComponent.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			end
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -209,8 +550,7 @@ script ThreeLaneHUD extends Component
 			return
 		end
 
-		if self:IsCardUsed(cardIndex) then
-			self:SetCardHint("이미 출전한 몬스터입니다.")
+		if not self:CanPickCard(cardIndex) then
 			return
 		end
 
@@ -275,7 +615,6 @@ script ThreeLaneHUD extends Component
 				self.SelectedCardIndex = 0
 				self:SetCardHint("배치 취소: 슬롯 중앙에 더 가깝게 놓아 주세요.")
 				log("[ThreeLaneHUD] Drag cancelled - Card=" .. tostring(cardIndex))
-				self:RefreshCardVisuals(self:GetUsedCardMask())
 			end
 		else
 			self:SelectCard(cardIndex)
@@ -287,32 +626,70 @@ script ThreeLaneHUD extends Component
 	end
 
 	@ExecSpace("ClientOnly")
-	method void SelectCard(integer cardIndex)
-		-- 탭한 카드를 선택하고 같은 카드를 다시 탭하면 선택을 취소한다.
+	method boolean CanPickCard(integer cardIndex)
+		-- 페이즈·사용 여부·보유 코스트를 확인해 카드를 집을 수 있는지 판정한다.
 		if cardIndex < 1 or cardIndex > 7 then
-			return
+			return false
+		end
+
+		local board = self:GetBoard()
+		if board == nil then
+			return false
+		end
+
+		if board.BattleState ~= "Playing" then
+			self:SetCardHint("전투가 끝났습니다. 재시작을 눌러 주세요.")
+			return false
+		end
+
+		if board.Phase ~= "Placement" then
+			self:SetCardHint("지금은 배치 단계가 아닙니다.")
+			return false
 		end
 
 		if self:IsCardUsed(cardIndex) then
-			self:SetCardHint("이미 출전한 몬스터입니다.")
-			return
+			self:SetCardHint("이번 턴에 이미 배치한 몬스터입니다.")
+			return false
 		end
 
+		local cost = self.CardCosts[cardIndex]
+		if board.CurrentCost < cost then
+			self:SetCardHint(
+				"코스트가 부족합니다. 필요 "
+					.. tostring(cost)
+					.. " · 보유 "
+					.. tostring(board.CurrentCost)
+			)
+			return false
+		end
+
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectCard(integer cardIndex)
+		-- 탭한 카드를 선택하고 같은 카드를 다시 탭하면 선택을 취소한다.
 		if self.SelectedCardIndex == cardIndex then
 			self.SelectedCardIndex = 0
 			self:SetCardHint("선택을 취소했습니다.")
 			log("[ThreeLaneHUD] Card deselected - Card=" .. tostring(cardIndex))
-		else
-			self.SelectedCardIndex = cardIndex
-			self:SetCardHint(
-				"몬스터 "
-				.. tostring(cardIndex)
-				.. " 선택 · 파란 슬롯을 터치하세요."
-			)
-			log("[ThreeLaneHUD] Card selected - Card=" .. tostring(cardIndex))
+			return
 		end
 
-		self:RefreshCardVisuals(self:GetUsedCardMask())
+		if not self:CanPickCard(cardIndex) then
+			return
+		end
+
+		self:ClearReservedSelection()
+		self.SelectedCardIndex = cardIndex
+		self:SetCardHint(
+			"몬스터 "
+			.. tostring(cardIndex)
+			.. " 선택 (코스트 "
+			.. tostring(self.CardCosts[cardIndex])
+			.. ") · 파란 슬롯을 터치하세요."
+		)
+		log("[ThreeLaneHUD] Card selected - Card=" .. tostring(cardIndex))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -329,13 +706,12 @@ script ThreeLaneHUD extends Component
 
 	@ExecSpace("ClientOnly")
 	method boolean RequestCardToSlot(integer cardIndex, Entity slotEntity, string inputSource)
-		-- 선택 카드와 슬롯을 검증한 뒤 맵 엔티티의 서버 RPC를 호출한다.
-		if cardIndex < 1 or cardIndex > 7 or not isvalid(slotEntity) then
+		-- 선택 카드와 슬롯을 검증한 뒤 맵 슬롯 엔티티의 서버 RPC를 호출한다.
+		if not isvalid(slotEntity) then
 			return false
 		end
 
-		if self:IsCardUsed(cardIndex) then
-			self:SetCardHint("이미 출전한 몬스터입니다.")
+		if not self:CanPickCard(cardIndex) then
 			return false
 		end
 
@@ -354,10 +730,11 @@ script ThreeLaneHUD extends Component
 		slot:RequestPlaceUnit(cardIndex)
 		self.SelectedCardIndex = 0
 		self:SetCardHint(
-			"배치 요청: 몬스터 "
+			"배치 예약: 몬스터 "
 				.. tostring(cardIndex)
 				.. " → 슬롯 "
 				.. tostring(slot.SlotIndex)
+				.. " · 확정하면 소환, `되돌리기`로 취소"
 		)
 		log(
 			"[ThreeLaneHUD] Placement requested - Source="
@@ -367,7 +744,6 @@ script ThreeLaneHUD extends Component
 				.. ", Slot="
 				.. tostring(slot.SlotIndex)
 		)
-		self:RefreshCardVisuals(self:GetUsedCardMask())
 		return true
 	end
 
@@ -468,7 +844,7 @@ script ThreeLaneHUD extends Component
 
 	@ExecSpace("ClientOnly")
 	method boolean IsCardUsed(integer cardIndex)
-		-- 동기화된 7자리 사용 마스크에서 해당 카드의 출전 여부를 읽는다.
+		-- 동기화된 7자리 사용 마스크에서 해당 카드의 이번 턴 사용 여부를 읽는다.
 		local mask = self:GetUsedCardMask()
 		if cardIndex < 1 or cardIndex > string.len(mask) then
 			return false
@@ -480,19 +856,8 @@ script ThreeLaneHUD extends Component
 	@ExecSpace("ClientOnly")
 	method string GetUsedCardMask()
 		-- 보드가 아직 동기화되지 않은 경우 안전한 기본 마스크를 반환한다.
-		local localPlayer = _UserService.LocalPlayer
-		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
-			return "0000000"
-		end
-
-		local boardEntity = localPlayer.CurrentMap:GetChildByName("PrototypeBoard")
-		if not isvalid(boardEntity) then
-			return "0000000"
-		end
-
-		---@type ThreeLaneBoard
-		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
-		if not isvalid(board) or board.UsedCardMask == nil then
+		local board = self:GetBoard()
+		if board == nil or board.UsedCardMask == nil then
 			return "0000000"
 		end
 
@@ -500,17 +865,26 @@ script ThreeLaneHUD extends Component
 	end
 
 	@ExecSpace("ClientOnly")
-	method void RefreshCardVisuals(string usedMask)
-		-- 사용 완료·선택·기본 상태를 서로 다른 색으로 구분한다.
+	method void RefreshCardVisuals(ThreeLaneBoard board)
+		-- 사용 완료·코스트 부족·선택·기본 상태를 서로 다른 색으로 구분한다.
+		local usedMask = board.UsedCardMask
 		if usedMask == nil or string.len(usedMask) < 7 then
 			usedMask = "0000000"
 		end
+
+		local placementOpen = board.BattleState == "Playing" and board.Phase == "Placement"
 
 		for index, cardEntity in ipairs(self.CardEntities) do
 			if isvalid(cardEntity) and isvalid(cardEntity.SpriteGUIRendererComponent) then
 				if string.sub(usedMask, index, index) == "1" then
 					cardEntity.SpriteGUIRendererComponent.Color =
 						Color(0.35, 0.37, 0.42, 0.72)
+				elseif not placementOpen then
+					cardEntity.SpriteGUIRendererComponent.Color =
+						Color(0.45, 0.47, 0.52, 0.72)
+				elseif board.CurrentCost < self.CardCosts[index] then
+					cardEntity.SpriteGUIRendererComponent.Color =
+						Color(0.62, 0.42, 0.42, 0.85)
 				elseif self.SelectedCardIndex == index then
 					cardEntity.SpriteGUIRendererComponent.Color =
 						Color(1.0, 0.80, 0.28, 1.0)
@@ -531,30 +905,69 @@ script ThreeLaneHUD extends Component
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnRestartClicked(ButtonClickEvent event)
-		-- UI 재시작 버튼을 맵 엔티티의 서버 RPC에 연결한다.
-		local localPlayer = _UserService.LocalPlayer
-		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+	method void OnConfirmClicked(ButtonClickEvent event)
+		-- 배치 확정 버튼을 보드의 서버 RPC로 연결한다.
+		local board = self:GetBoard()
+		if board == nil then
+			log_error("[ThreeLaneHUD] Confirm failed - board not found")
 			return
 		end
 
-		local restartEntity = localPlayer.CurrentMap:GetChildByName("PrototypeRestart")
-		if not isvalid(restartEntity) then
-			log_error("[ThreeLaneHUD] PrototypeRestart not found")
+		if board.BattleState ~= "Playing" then
+			self:SetCardHint("전투가 끝났습니다. 재시작을 눌러 주세요.")
 			return
 		end
 
-		---@type ThreeLaneRestart
-		local restart = restartEntity:GetComponent("script.ThreeLaneRestart")
-		if not isvalid(restart) then
-			log_error("[ThreeLaneHUD] ThreeLaneRestart component not found")
+		if board.Phase ~= "Placement" then
+			self:SetCardHint("지금은 배치 단계가 아닙니다.")
 			return
 		end
 
 		self.SelectedCardIndex = 0
+		self:ClearReservedSelection()
 		self:ClearSnapTarget()
-		restart:RequestRestart()
+		board:RequestConfirmPlacement()
+		self:SetCardHint("배치를 확정했습니다. 전투를 시작합니다.")
+		log("[ThreeLaneHUD] Confirm clicked - Turn=" .. tostring(board.TurnNumber))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRestartClicked(ButtonClickEvent event)
+		-- UI 재시작 버튼을 보드의 서버 RPC로 연결한다.
+		local board = self:GetBoard()
+		if board == nil then
+			log_error("[ThreeLaneHUD] Restart failed - board not found")
+			return
+		end
+
+		self.SelectedCardIndex = 0
+		self:ClearReservedSelection()
+		self:ClearSnapTarget()
+		board:RequestRestart()
 		self:SetCardHint("전투를 처음부터 다시 시작했습니다.")
+		log("[ThreeLaneHUD] Restart clicked")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSpeed1Clicked(ButtonClickEvent event)
+		-- ×1 버튼을 서버 권위 배속 요청으로 연결한다.
+		local board = self:GetBoard()
+		if board == nil then
+			return
+		end
+		board:RequestSetSimulationSpeed(1)
+		self:SetCardHint("전투 배속을 ×1로 변경했습니다.")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSpeed2Clicked(ButtonClickEvent event)
+		-- ×2 버튼을 서버 권위 배속 요청으로 연결한다.
+		local board = self:GetBoard()
+		if board == nil then
+			return
+		end
+		board:RequestSetSimulationSpeed(2)
+		self:SetCardHint("전투 배속을 ×2로 변경했습니다.")
 	end
 
 end

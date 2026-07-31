@@ -9,12 +9,7 @@ script ThreeLaneSlot extends Component
 	@ExecSpace("ClientOnly")
 	@EventSender("Self")
 	handler HandleTouchEvent(TouchEvent event)
-		-- 월드 슬롯 터치를 HUD의 현재 선택 카드 배치 경로로 전달한다.
-		if self.IsOccupied then
-			log("[ThreeLaneSlot] Slot click ignored - occupied: " .. tostring(self.SlotIndex))
-			return
-		end
-
+		-- 빈 슬롯은 배치 경로로, 예약된 슬롯은 취소 대상 선택 경로로 보낸다.
 		local hudEntity = _EntityService:GetEntityByPath("/ui/ThreeLaneHUD/Controller")
 		if not isvalid(hudEntity) then
 			log_error("[ThreeLaneSlot] ThreeLaneHUD Controller not found")
@@ -28,12 +23,17 @@ script ThreeLaneSlot extends Component
 			return
 		end
 
+		if self.IsOccupied then
+			hud:SelectReservedSlot(self.Entity)
+			return
+		end
+
 		hud:RequestSelectedCardToSlot(self.Entity)
 	end
 
 	@ExecSpace("Server")
 	method void RequestPlaceUnit(integer cardIndex)
-		-- 서버에서 카드 번호와 슬롯 점유 상태를 다시 검증한 뒤 배치를 실행한다.
+		-- 서버에서 슬롯 점유와 페이즈를 다시 검증한 뒤 배치 명령을 보드에 기록한다.
 		if cardIndex < 1 or cardIndex > 7 then
 			log("[ThreeLaneSlot] Invalid card index: " .. tostring(cardIndex))
 			return
@@ -57,11 +57,22 @@ script ThreeLaneSlot extends Component
 			return
 		end
 
+		if board.Phase ~= "Placement" then
+			log(
+				"[ThreeLaneSlot] Slot request ignored - phase is "
+					.. board.Phase
+					.. ", Slot="
+					.. tostring(self.SlotIndex)
+			)
+			return
+		end
+
 		local spawnPosition = self.Entity.TransformComponent.WorldPosition
-		local accepted = board:TrySpawnPlayerUnit(
+		local accepted = board:TryPlaceCardForOwner(
 			self.SlotIndex,
 			spawnPosition,
-			cardIndex
+			cardIndex,
+			senderUserId
 		)
 
 		if accepted then
@@ -70,7 +81,7 @@ script ThreeLaneSlot extends Component
 				self.Entity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
 			end
 			log(
-				"[ThreeLaneSlot] Slot occupied: "
+				"[ThreeLaneSlot] Slot reserved: "
 					.. tostring(self.SlotIndex)
 					.. ", Card="
 					.. tostring(cardIndex)
@@ -80,7 +91,7 @@ script ThreeLaneSlot extends Component
 
 	@ExecSpace("ServerOnly")
 	method void ResetSlot()
-		-- 재시작 시 슬롯 점유와 기본 파란색을 복구한다.
+		-- 턴 정산과 재시작 시 슬롯 점유와 기본 파란색을 복구한다.
 		self.IsOccupied = false
 		if isvalid(self.Entity.SpriteRendererComponent) then
 			self.Entity.SpriteRendererComponent.Color = Color(0.25, 0.65, 1.0, 0.85)

@@ -11,99 +11,405 @@ script ThreeLaneBoard extends Component
 	property string BattleState = "Playing"
 
 	@Sync
+	property string Phase = "Placement"
+
+	@Sync
 	property integer TurnNumber = 1
 
 	@Sync
-	property integer RemainingTime = 30
+	property number BattleRemaining = 60
 
 	@Sync
 	property integer CurrentCost = 2
 
 	@Sync
+	property integer EnemyCurrentCost = 2
+
+	@Sync
 	property integer MaxCost = 10
+
+	@Sync
+	property integer PendingCount = 0
+
+	@Sync
+	property integer EnemyPendingCount = 0
 
 	@Sync
 	property string UsedCardMask = "0000000"
 
+	@Sync
+	property number SimSpeed = 1
+
 	property string UnitModelId = "threelaneprototypeunit"
 
+	property number BattleTimeLimit = 60
+
+	property number BattleMinTime = 0.6
+
+	property number RevealDuration = 0.4
+
+	property number ResolveDuration = 0.6
+
+	property integer StartCost = 2
+
+	property integer CostGainPerTurn = 2
+
+	property table CardCosts = { 1, 2, 3, 4, 5, 6, 8 }
+
 	property integer SpawnSerial = 0
+
+	property integer PlacementSerial = 0
+
+	property integer EnemyPlacementSerial = 0
+
+	property number PhaseElapsed = 0
+
+	property table PendingPlacements = {}
+
+	property table EnemyPendingPlacements = {}
 
 	property table ActiveUnits = {}
 
 	property table UsedCards = {}
 
-	property boolean TurnTimerRunning = false
+	property integer DrakeCardIndex = 5
 
-	property number TurnElapsed = 0
+	property integer EnemyFixedSlotIndex = 8
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
-		-- 서버 전투 상태를 초기화하고 프로토타입 시작을 기록한다.
-		log("[ThreeLaneBoard] OnBeginPlay - Phase 1 prototype ready")
+		-- 서버 전투 상태를 초기화하고 Phase 2A 턴 기반 시작을 기록한다.
+		log("[ThreeLaneBoard] OnBeginPlay - Phase 2B board authority ready")
 		self:ResetBattle()
 	end
 
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
-		-- 진행 중인 턴 타이머를 초 단위로 감소시킨다.
-		if not self.TurnTimerRunning or self.BattleState ~= "Playing" then
+		-- 승패가 확정되지 않은 동안 현재 페이즈를 진행한다.
+		if self.BattleState ~= "Playing" then
 			return
 		end
 
-		self.TurnElapsed = self.TurnElapsed + delta
-		if self.TurnElapsed < 1 then
+		if self.Phase == "Placement" then
 			return
 		end
 
-		local elapsedSeconds = math.floor(self.TurnElapsed)
-		self.TurnElapsed = self.TurnElapsed - elapsedSeconds
-		self.RemainingTime = self.RemainingTime - elapsedSeconds
-		if self.RemainingTime > 0 then
+		if self.Phase == "Reveal" then
+			self.PhaseElapsed = self.PhaseElapsed + delta
+			if self.PhaseElapsed >= self.RevealDuration then
+				self:EnterBattle()
+			end
 			return
 		end
 
-		self.RemainingTime = 0
-		self.TurnElapsed = 0
-		self.TurnTimerRunning = false
-		log("[ThreeLaneBoard] Turn timer expired - Turn=" .. tostring(self.TurnNumber))
+		if self.Phase == "Battle" then
+			-- 전투 시간과 모든 판정은 ThreeLaneCombat의 고정 Tick만 갱신한다.
+			return
+		end
+
+		if self.Phase == "Resolve" then
+			self.PhaseElapsed = self.PhaseElapsed + delta
+			if self.PhaseElapsed >= self.ResolveDuration then
+				self:BeginNextTurn()
+			end
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestPlaceCard(integer slotIndex, Vector3 spawnPosition, integer cardIndex)
+		-- 클라이언트 배치 요청을 서버 검증 경로로 연결한다.
+		self:TryPlaceCardForOwner(slotIndex, spawnPosition, cardIndex, senderUserId)
 	end
 
 	@ExecSpace("ServerOnly")
-	method boolean TrySpawnPlayerUnit(integer slotIndex, Vector3 spawnPosition, integer cardIndex)
-		-- 카드와 전투 상태를 검증하고 선택된 슬롯에 프로토타입 유닛을 생성한다.
+	method boolean TryPlaceCardForOwner(integer slotIndex, Vector3 spawnPosition, integer cardIndex, string ownerUserId)
+		-- 페이즈·카드·코스트를 검증하고 배치 명령만 기록한다. 실제 소환은 Reveal에서 한다.
 		if self.BattleState ~= "Playing" then
-			log("[ThreeLaneBoard] Spawn rejected - battle is " .. self.BattleState)
+			log("[ThreeLaneBoard] Placement rejected - battle is " .. self.BattleState)
+			return false
+		end
+
+		if self.Phase ~= "Placement" then
+			log("[ThreeLaneBoard] Placement rejected - phase is " .. self.Phase)
+			return false
+		end
+
+		if slotIndex < 1 or slotIndex > 15 then
+			log("[ThreeLaneBoard] Placement rejected - invalid slot " .. tostring(slotIndex))
 			return false
 		end
 
 		if cardIndex < 1 or cardIndex > 7 then
-			log("[ThreeLaneBoard] Spawn rejected - invalid card " .. tostring(cardIndex))
+			log("[ThreeLaneBoard] Placement rejected - invalid card " .. tostring(cardIndex))
 			return false
 		end
 
 		if self.UsedCards[cardIndex] == true then
-			log("[ThreeLaneBoard] Spawn rejected - card already used " .. tostring(cardIndex))
+			log("[ThreeLaneBoard] Placement rejected - card already used " .. tostring(cardIndex))
 			return false
 		end
 
-		self.SpawnSerial = self.SpawnSerial + 1
-		local unitName =
-			"PlayerPrototypeUnit_C"
+		local cost = self.CardCosts[cardIndex]
+		if self.CurrentCost < cost then
+			log(
+				"[ThreeLaneBoard] Placement rejected - not enough cost. need="
+				.. tostring(cost)
+				.. ", have="
+				.. tostring(self.CurrentCost)
+			)
+			return false
+		end
+
+		self.CurrentCost = self.CurrentCost - cost
+		self.UsedCards[cardIndex] = true
+		self:RefreshUsedCardMask()
+
+		self.PlacementSerial = self.PlacementSerial + 1
+		table.insert(
+			self.PendingPlacements,
+			{
+				Order = self.PlacementSerial,
+				CardIndex = cardIndex,
+				SlotIndex = slotIndex,
+				Position = spawnPosition,
+				OwnerUserId = ownerUserId,
+				OwnerSide = 1
+			}
+		)
+		self.PendingCount = #self.PendingPlacements
+
+		log(
+			"[ThreeLaneBoard] Placement accepted - Order="
+			.. tostring(self.PlacementSerial)
+			.. ", Card="
 			.. tostring(cardIndex)
+			.. ", Slot="
+			.. tostring(slotIndex)
+			.. ", Cost=-"
+			.. tostring(cost)
+			.. ", Left="
+			.. tostring(self.CurrentCost)
+		)
+		return true
+	end
+
+	@ExecSpace("Server")
+	method void RequestUndoPlacement()
+		-- 이번 턴에 가장 마지막으로 예약한 배치를 되돌린다(undo). 예약이 없어질 때까지 반복 가능.
+		if not self:CanCancelNow("Undo") then
+			return
+		end
+
+		local count = #self.PendingPlacements
+		if count == 0 then
+			log("[ThreeLaneBoard] Undo rejected - no reservation to undo")
+			return
+		end
+
+		self:CancelPlacementAt(count, senderUserId, "Undo")
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancelPlacement(integer slotIndex)
+		-- 특정 슬롯의 예약 배치를 지정해 취소한다.
+		if not self:CanCancelNow("Cancel") then
+			return
+		end
+
+		local foundIndex = 0
+		for index, command in ipairs(self.PendingPlacements) do
+			if command.SlotIndex == slotIndex then
+				foundIndex = index
+				break
+			end
+		end
+
+		if foundIndex == 0 then
+			log("[ThreeLaneBoard] Cancel rejected - no reservation on slot " .. tostring(slotIndex))
+			return
+		end
+
+		self:CancelPlacementAt(foundIndex, senderUserId, "Cancel")
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanCancelNow(string source)
+		-- 취소·되돌리기가 허용되는 상태인지 확인한다. 확정 이후에는 항상 거부한다.
+		if self.BattleState ~= "Playing" then
+			log("[ThreeLaneBoard] " .. source .. " rejected - battle is " .. self.BattleState)
+			return false
+		end
+
+		if self.Phase ~= "Placement" then
+			log("[ThreeLaneBoard] " .. source .. " rejected - phase is " .. self.Phase)
+			return false
+		end
+
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CancelPlacementAt(integer commandIndex, string requesterUserId, string source)
+		-- 예약 명령 하나를 제거하고 슬롯·코스트·카드·순번을 배치 이전 상태로 되돌린다.
+		local target = self.PendingPlacements[commandIndex]
+		if target == nil then
+			log("[ThreeLaneBoard] " .. source .. " rejected - reservation not found")
+			return
+		end
+
+		if target.OwnerUserId ~= requesterUserId then
+			log(
+				"[ThreeLaneBoard] "
+				.. source
+				.. " rejected - not the owner of slot "
+				.. tostring(target.SlotIndex)
+			)
+			return
+		end
+
+		local slotIndex = target.SlotIndex
+		local refund = self.CardCosts[target.CardIndex]
+		self.CurrentCost = self.CurrentCost + refund
+		self.UsedCards[target.CardIndex] = false
+		self:RefreshUsedCardMask()
+
+		table.remove(self.PendingPlacements, commandIndex)
+		self:ReorderPlacements()
+		self.PendingCount = #self.PendingPlacements
+
+		self:ReleaseSlot(slotIndex)
+
+		log(
+			"[ThreeLaneBoard] "
+			.. source
+			.. " accepted - Slot="
+			.. tostring(slotIndex)
+			.. ", Card="
+			.. tostring(target.CardIndex)
+			.. ", Refund=+"
+			.. tostring(refund)
+			.. ", Cost="
+			.. tostring(self.CurrentCost)
+			.. ", Pending="
+			.. tostring(self.PendingCount)
+			.. ", UsedCardMask="
+			.. self.UsedCardMask
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReorderPlacements()
+		-- 남은 예약 명령의 상대 순서를 유지한 채 1부터 연속된 PlacementOrder로 재정렬한다.
+		local order = ""
+		for index, command in ipairs(self.PendingPlacements) do
+			command.Order = index
+			order = order
+				.. " ["
+				.. tostring(index)
+				.. "]Card"
+				.. tostring(command.CardIndex)
+				.. "@Slot"
+				.. tostring(command.SlotIndex)
+		end
+
+		self.PlacementSerial = #self.PendingPlacements
+		log("[ThreeLaneBoard] PlacementOrder reordered ->" .. order)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReleaseSlot(integer slotIndex)
+		-- 취소된 예약의 슬롯 점유와 표식 색을 되돌린다.
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then
+			return
+		end
+
+		local slotEntity = map:GetChildByName("PlayerSlot_" .. tostring(slotIndex))
+		if not isvalid(slotEntity) then
+			return
+		end
+
+		---@type ThreeLaneSlot
+		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+		if isvalid(slot) then
+			slot:ResetSlot()
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestConfirmPlacement()
+		-- 배치 확정 입력을 받아 공개 단계로 넘어간다. 배치 0건도 허용한다.
+		if self.BattleState ~= "Playing" then
+			return
+		end
+
+		if self.Phase ~= "Placement" then
+			log("[ThreeLaneBoard] Confirm ignored - phase is " .. self.Phase)
+			return
+		end
+
+		self:EnterReveal()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnterReveal()
+		-- 양측의 비공개 명령을 공개하고 각각 기록된 순서로 같은 Reveal에서 소환한다.
+		self.Phase = "Reveal"
+		self.PhaseElapsed = 0
+		log(
+			"[ThreeLaneBoard] Phase=Reveal - Turn="
+			.. tostring(self.TurnNumber)
+			.. ", Pending="
+			.. tostring(#self.PendingPlacements)
+			.. ", EnemyPending="
+			.. tostring(#self.EnemyPendingPlacements)
+		)
+
+		for _, command in ipairs(self.PendingPlacements) do
+			self:SpawnPlacement(command)
+		end
+		for _, command in ipairs(self.EnemyPendingPlacements) do
+			self:SpawnPlacement(command)
+		end
+
+		self.PendingPlacements = {}
+		self.PendingCount = 0
+		self.EnemyPendingPlacements = {}
+		self.EnemyPendingCount = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnPlacement(table command)
+		-- 양 진영 공통 명령 하나를 수동 상태 유닛으로 생성하고 Combat에 등록한다.
+		self.SpawnSerial = self.SpawnSerial + 1
+		local ownerSide = command.OwnerSide
+		if ownerSide ~= 2 then
+			ownerSide = 1
+		end
+		local sideName = "Player"
+		if ownerSide == 2 then
+			sideName = "Enemy"
+		end
+		local unitName =
+			sideName
+			.. "Unit_T"
+			.. tostring(self.TurnNumber)
+			.. "_C"
+			.. tostring(command.CardIndex)
 			.. "_"
 			.. tostring(self.SpawnSerial)
+
 		local map = self.Entity.CurrentMap
 		local unit = _SpawnService:SpawnByModelId(
 			self.UnitModelId,
 			unitName,
-			spawnPosition,
+			command.Position,
 			map
 		)
 
 		if not isvalid(unit) then
-			log_error("[ThreeLaneBoard] SpawnByModelId failed for slot " .. tostring(slotIndex))
-			return false
+			log_error("[ThreeLaneBoard] SpawnByModelId failed for slot " .. tostring(command.SlotIndex))
+			return
 		end
 
 		---@type ThreeLaneUnit
@@ -111,124 +417,523 @@ script ThreeLaneBoard extends Component
 		if not isvalid(unitComponent) then
 			log_error("[ThreeLaneBoard] Spawned unit has no ThreeLaneUnit")
 			_EntityService:Destroy(unit)
-			return false
+			return
 		end
 
-		unitComponent.OwnerSide = 1
-		unitComponent.Damage = 3
-		unitComponent.TargetX = 5.35
+		local cost = self.CardCosts[command.CardIndex]
+		local laneIndex = math.floor((command.SlotIndex - 1) / 5) + 1
+		unitComponent.OwnerSide = ownerSide
+		unitComponent.LaneIndex = laneIndex
+		unitComponent.SlotIndex = command.SlotIndex
+		unitComponent.CardIndex = command.CardIndex
+		unitComponent.Cost = cost
+		unitComponent.HP = 600
+		unitComponent.MaxHP = 600
+		unitComponent.Attack = 120
+		unitComponent.AttackIntervalTicks = 72
+		unitComponent.FirstAttackDelayTicks = 18
+		unitComponent.MoveSpeed = 1.0
+		unitComponent.AttackRange = 0.70
+		unitComponent.NexusDamage = cost
+		unitComponent.SimX = command.Position.x
+		unitComponent.TargetNexusX = 5.35
+		if ownerSide == 2 then
+			unitComponent.TargetNexusX = -5.35
+		end
+
+		if isvalid(unit.SpriteRendererComponent) then
+			if ownerSide == 2 then
+				unit.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.45, 1.0)
+			else
+				unit.SpriteRendererComponent.Color = Color(0.45, 0.75, 1.0, 1.0)
+			end
+		end
+
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[ThreeLaneBoard] ThreeLaneCombat missing on PrototypeBoard")
+			_EntityService:Destroy(unit)
+			return
+		end
+		combat:RegisterUnit(unitComponent)
 		table.insert(self.ActiveUnits, unit)
-		self.UsedCards[cardIndex] = true
+
+		log(
+			"[ThreeLaneBoard] Spawn Side="
+			.. sideName
+			.. ", CombatUnitId="
+			.. tostring(unitComponent.CombatUnitId)
+			.. ", Order="
+			.. tostring(command.Order)
+			.. ", Card="
+			.. tostring(command.CardIndex)
+			.. ", Slot="
+			.. tostring(command.SlotIndex)
+			.. ", Cost="
+			.. tostring(unitComponent.Cost)
+			.. ", HP=600, Attack=120, AttackIntervalTicks=72, FirstAttackDelayTicks=18"
+			.. ", MoveSpeed=1.0, AttackRange=0.70, NexusDamage="
+			.. tostring(unitComponent.NexusDamage)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnterBattle()
+		-- 페이즈 권위를 Battle로 바꾸고 단일 Combat 고정 Tick 시뮬레이션을 시작한다.
+		self.Phase = "Battle"
+		self.PhaseElapsed = 0
+		self.BattleRemaining = self.BattleTimeLimit
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[ThreeLaneBoard] EnterBattle failed - ThreeLaneCombat missing")
+			return
+		end
+		combat:StartBattle(self.SimSpeed)
+		log(
+			"[ThreeLaneBoard] Phase=Battle - Turn="
+			.. tostring(self.TurnNumber)
+			.. ", Units="
+			.. tostring(self:CountActiveUnits())
+			.. ", Limit="
+			.. tostring(self.BattleTimeLimit)
+			.. "s/3600ticks, SimSpeed="
+			.. tostring(self.SimSpeed)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnterResolve(string reason)
+		-- 전투 페이즈를 끝내고 다음 턴 정산 단계로 넘어간다.
+		self.Phase = "Resolve"
+		self.PhaseElapsed = 0
+		log(
+			"[ThreeLaneBoard] Phase=Resolve - Turn="
+			.. tostring(self.TurnNumber)
+			.. ", Reason="
+			.. reason
+			.. ", PlayerCost="
+			.. tostring(self.CurrentCost)
+			.. ", EnemyCost="
+			.. tostring(self.EnemyCurrentCost)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginNextTurn()
+		-- 슬롯·카드를 초기화하고 코스트를 충전한 뒤 다음 배치 페이즈를 연다.
+		self:ClearSlots()
+		self.UsedCards = {}
 		self:RefreshUsedCardMask()
 
+		-- 배치 순서는 해당 턴 안에서만 의미를 가지므로 턴마다 폐기한다.
+		self.PlacementSerial = 0
+		self.TurnNumber = self.TurnNumber + 1
+		local gained = self.CurrentCost + self.CostGainPerTurn
+		if gained > self.MaxCost then
+			gained = self.MaxCost
+		end
+		self.CurrentCost = gained
+		local enemyGained = self.EnemyCurrentCost + self.CostGainPerTurn
+		if enemyGained > self.MaxCost then
+			enemyGained = self.MaxCost
+		end
+		self.EnemyCurrentCost = enemyGained
+
+		self.Phase = "Placement"
+		self.PhaseElapsed = 0
+		self.BattleRemaining = self.BattleTimeLimit
+		self:PrepareEnemyPlacementForTurn()
+
 		log(
-			"[ThreeLaneBoard] Spawned card "
-			.. tostring(cardIndex)
-			.. " from slot "
-			.. tostring(slotIndex)
-			.. " at "
-			.. tostring(spawnPosition)
+			"[ThreeLaneBoard] Phase=Placement - Turn="
+			.. tostring(self.TurnNumber)
+			.. ", Cost="
+			.. tostring(self.CurrentCost)
+			.. "/"
+			.. tostring(self.MaxCost)
+			.. ", UsedCardMask="
+			.. self.UsedCardMask
+			.. ", EnemyCost="
+			.. tostring(self.EnemyCurrentCost)
+			.. ", EnemyPending="
+			.. tostring(self.EnemyPendingCount)
 		)
-		return true
 	end
 
 	@ExecSpace("ServerOnly")
-	method void ResolveEnemyNexusHit(integer damage, Entity sourceUnit)
-		-- 플레이어 유닛의 최후의 일격을 적 수호석 체력과 승리 판정에 반영한다.
-		if self.BattleState ~= "Playing" then
-			return
+	method integer CountActiveUnits()
+		-- 활성 개체 수는 전투 단일 권위인 Combat 레지스트리에서만 읽는다.
+		local combat = self:GetCombat()
+		if isvalid(combat) then
+			return combat:CountActiveUnits()
 		end
-
-		self.EnemyNexusHp = self.EnemyNexusHp - damage
-		if self.EnemyNexusHp < 0 then
-			self.EnemyNexusHp = 0
-		end
-
-		log(
-			"[ThreeLaneBoard] Enemy Nexus hit: -"
-			.. tostring(damage)
-			.. ", HP="
-			.. tostring(self.EnemyNexusHp)
-		)
-
-		if isvalid(sourceUnit) then
-			_EntityService:Destroy(sourceUnit)
-		end
-
-		if self.EnemyNexusHp <= 0 then
-			self.BattleState = "Victory"
-			self.TurnTimerRunning = false
-			self:StopActiveUnits()
-			log("[ThreeLaneBoard] RESULT=Victory")
-		end
-
-		self:RefreshWorldText()
+		return 0
 	end
 
 	@ExecSpace("ServerOnly")
-	method void ResolvePlayerNexusHit(integer damage)
-		-- 적 공격 피해를 플레이어 수호석 체력과 패배 판정에 반영한다.
-		if self.BattleState ~= "Playing" then
-			return
+	method void KillActiveUnits()
+		-- 재시작·정리 시 Combat 레지스트리와 실제 엔티티를 함께 비운다.
+		local combat = self:GetCombat()
+		if isvalid(combat) then
+			combat:ResetSimulation(true)
+		else
+			for _, unit in ipairs(self.ActiveUnits) do
+				if isvalid(unit) then
+					_EntityService:Destroy(unit)
+				end
+			end
 		end
-
-		self.PlayerNexusHp = self.PlayerNexusHp - damage
-		if self.PlayerNexusHp < 0 then
-			self.PlayerNexusHp = 0
-		end
-
-		log(
-			"[ThreeLaneBoard] Player Nexus hit: -"
-			.. tostring(damage)
-			.. ", HP="
-			.. tostring(self.PlayerNexusHp)
-		)
-
-		if self.PlayerNexusHp <= 0 then
-			self.BattleState = "Defeat"
-			self.TurnTimerRunning = false
-			self:StopActiveUnits()
-			log("[ThreeLaneBoard] RESULT=Defeat")
-		end
-
-		self:RefreshWorldText()
+		self.ActiveUnits = {}
 	end
 
 	@ExecSpace("ServerOnly")
 	method void StopActiveUnits()
-		-- 승패가 결정되면 남아 있는 모든 유닛의 이동을 멈춘다.
-		for _, unit in ipairs(self.ActiveUnits) do
-			if isvalid(unit) and isvalid(unit.KinematicbodyComponent) then
-				unit.KinematicbodyComponent.MoveVelocity = Vector2.zero
-			end
+		-- 승패가 결정되면 Combat이 관리하는 모든 시각 이동을 멈춘다.
+		local combat = self:GetCombat()
+		if isvalid(combat) then
+			combat:StopAllVisuals()
 		end
 	end
 
 	@ExecSpace("ServerOnly")
-	method void ResetBattle()
-		-- 전투·카드·슬롯 상태를 초기값으로 되돌려 처음부터 재도전하게 한다.
-		for _, unit in ipairs(self.ActiveUnits) do
-			if isvalid(unit) then
-				_EntityService:Destroy(unit)
-			end
+	method void ResolveEnemyNexusHit(integer damage, Entity sourceUnit)
+		-- 구 Phase 1 호출도 단일 수호석 피해 묶음 경로로 호환 처리한다.
+		self:ApplyNexusDamageBatch(0, damage, 0)
+		if isvalid(sourceUnit) then
+			_EntityService:Destroy(sourceUnit)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResolvePlayerNexusHit(integer damage)
+		-- 구 호출도 양측 일괄 수호석 피해 메서드로 연결한다.
+		self:ApplyNexusDamageBatch(damage, 0, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyNexusDamageBatch(integer playerDamage, integer enemyDamage, integer simTick)
+		-- 같은 Tick의 양측 수호석 피해를 모두 적용한 뒤 한 번만 결과를 확정한다.
+		if self.BattleState ~= "Playing" then
+			return
 		end
 
-		self.ActiveUnits = {}
+		local playerBefore = self.PlayerNexusHp
+		local enemyBefore = self.EnemyNexusHp
+		self.PlayerNexusHp = self.PlayerNexusHp - playerDamage
+		self.EnemyNexusHp = self.EnemyNexusHp - enemyDamage
+		if self.PlayerNexusHp < 0 then
+			self.PlayerNexusHp = 0
+		end
+		if self.EnemyNexusHp < 0 then
+			self.EnemyNexusHp = 0
+		end
+
+		if playerDamage > 0 or enemyDamage > 0 then
+			log(
+				"[ThreeLaneBoard][NexusBatch] Tick="
+				.. tostring(simTick)
+				.. ", PlayerHP="
+				.. tostring(playerBefore)
+				.. "->"
+				.. tostring(self.PlayerNexusHp)
+				.. ", EnemyHP="
+				.. tostring(enemyBefore)
+				.. "->"
+				.. tostring(self.EnemyNexusHp)
+			)
+		end
+
+		if self.PlayerNexusHp <= 0 and self.EnemyNexusHp <= 0 then
+			self.BattleState = "Draw"
+		elseif self.EnemyNexusHp <= 0 then
+			self.BattleState = "Victory"
+		elseif self.PlayerNexusHp <= 0 then
+			self.BattleState = "Defeat"
+		end
+
+		if self.BattleState ~= "Playing" then
+			self:StopActiveUnits()
+			log(
+				"[ThreeLaneBoard] RESULT="
+				.. self.BattleState
+				.. ", Tick="
+				.. tostring(simTick)
+				.. ", PlayerCost="
+				.. tostring(self.CurrentCost)
+				.. ", EnemyCost="
+				.. tostring(self.EnemyCurrentCost)
+			)
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestRestart()
+		-- HUD 재시작 입력을 서버 초기화로 연결한다.
+		self:ResetBattle()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetBattle()
+		-- 전투·턴·코스트·카드·슬롯 상태를 초기값으로 되돌려 처음부터 재도전하게 한다.
+		self:KillActiveUnits()
+
+		self.PendingPlacements = {}
+		self.PendingCount = 0
+		self.EnemyPendingPlacements = {}
+		self.EnemyPendingCount = 0
 		self.UsedCards = {}
 		self.UsedCardMask = "0000000"
+		self.PlacementSerial = 0
+		self.EnemyPlacementSerial = 0
 		self.PlayerNexusHp = 30
 		self.EnemyNexusHp = 30
 		self.BattleState = "Playing"
+		self.Phase = "Placement"
+		self.PhaseElapsed = 0
 		self.TurnNumber = 1
-		self.RemainingTime = 30
-		self.TurnElapsed = 0
-		self.CurrentCost = 2
+		self.BattleRemaining = self.BattleTimeLimit
+		self.CurrentCost = self.StartCost
+		self.EnemyCurrentCost = self.StartCost
 		self.MaxCost = 10
-		self.TurnTimerRunning = true
+		self.SimSpeed = 1
+
+		self:ClearSlots()
+		self:PrepareEnemyPlacementForTurn()
+
+		log(
+			"[ThreeLaneBoard] Battle reset - PlayerHP=30, EnemyHP=30, Turn=1, Cost="
+			.. tostring(self.CurrentCost)
+			.. "/"
+			.. tostring(self.MaxCost)
+			.. ", Phase=Placement"
+			.. ", EnemyCost="
+			.. tostring(self.EnemyCurrentCost)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method ThreeLaneCombat GetCombat()
+		-- 같은 PrototypeBoard 엔티티의 전투 단일 권위 컴포넌트를 반환한다.
+		---@type ThreeLaneCombat
+		local combat = self.Entity:GetComponent("script.ThreeLaneCombat")
+		if not isvalid(combat) then
+			return nil
+		end
+		return combat
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PrepareEnemyPlacementForTurn()
+		-- 플레이어 입력 전에 Turn 3의 독립 중앙 드레이크 명령을 만들고 그 외 턴은 패스한다.
+		self.EnemyPendingPlacements = {}
+		self.EnemyPendingCount = 0
+		self.EnemyPlacementSerial = 0
+
+		if self.TurnNumber ~= 3 then
+			log(
+				"[ThreeLaneBoard][EnemyPlan] Turn="
+				.. tostring(self.TurnNumber)
+				.. " PASS, Cost="
+				.. tostring(self.EnemyCurrentCost)
+			)
+			return
+		end
+
+		local cost = self.CardCosts[self.DrakeCardIndex]
+		if self.EnemyCurrentCost < cost then
+			log_error("[ThreeLaneBoard][EnemyPlan] Turn 3 Drake cost unavailable")
+			return
+		end
+
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then
+			return
+		end
+		local slot = map:GetChildByName("EnemySlot_" .. tostring(self.EnemyFixedSlotIndex))
+		if not isvalid(slot) then
+			log_error("[ThreeLaneBoard][EnemyPlan] EnemySlot_8 not found")
+			return
+		end
+
+		self.EnemyCurrentCost = self.EnemyCurrentCost - cost
+		self.EnemyPlacementSerial = 1
+		table.insert(
+			self.EnemyPendingPlacements,
+			{
+				Order = 1,
+				CardIndex = self.DrakeCardIndex,
+				SlotIndex = self.EnemyFixedSlotIndex,
+				Position = slot.TransformComponent.WorldPosition,
+				OwnerUserId = "EnemyAI",
+				OwnerSide = 2
+			}
+		)
+		self.EnemyPendingCount = 1
+		log(
+			"[ThreeLaneBoard][EnemyPlan] Turn=3 precommitted before player input"
+			.. ", Card=5, Slot=8, Cost=6->"
+			.. tostring(self.EnemyCurrentCost)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateBattleRemainingFromCombat(integer simTick, integer limitTicks)
+		-- HUD 표시값을 Combat의 정수 Tick에서만 파생해 동기화한다.
+		local remainingTicks = limitTicks - simTick
+		if remainingTicks < 0 then
+			remainingTicks = 0
+		end
+		self.BattleRemaining = remainingTicks / 60
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnCombatResolved(string reason, integer simTick)
+		-- Combat의 활성 개체 0 또는 타임아웃 통지를 한 번만 Resolve 페이즈로 전환한다.
+		if self.BattleState ~= "Playing" or self.Phase ~= "Battle" then
+			return
+		end
+		log(
+			"[ThreeLaneBoard] Combat resolved - Tick="
+			.. tostring(simTick)
+			.. ", Reason="
+			.. reason
+			.. ", PlayerCost="
+			.. tostring(self.CurrentCost)
+			.. ", EnemyCost="
+			.. tostring(self.EnemyCurrentCost)
+		)
+		self:EnterResolve(reason)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetSimulationSpeed(integer speed)
+		-- 클라이언트 배속 버튼 요청을 서버의 1/2 배속 검증 경로로 연결한다.
+		self:SetSimulationSpeed(speed)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetSimulationSpeed(integer speed)
+		-- 현재 배속을 1 또는 2로 제한하고 Combat 처리 Tick 수에만 반영한다.
+		if speed ~= 2 then
+			self.SimSpeed = 1
+		else
+			self.SimSpeed = 2
+		end
+		local combat = self:GetCombat()
+		if isvalid(combat) then
+			combat:SetSimulationSpeed(self.SimSpeed)
+		end
+		log("[ThreeLaneBoard] SimSpeed=x" .. tostring(self.SimSpeed))
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2ARegression()
+		-- Maker Play에서 Phase 2A의 페이즈·코스트·취소·확정·타임아웃·재시작을 회귀 점검한다.
+		local allPassed = true
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			return false
+		end
+		combat.MakerHarnessRunning = true
+
+		self:ResetBattle()
+		local phaseStart = self.Phase == "Placement" and self.TurnNumber == 1 and self.CurrentCost == 2
+		allPassed = self:RecordMakerRegression("PhaseStart", phaseStart) and allPassed
+		self:EnterReveal()
+		self:EnterBattle()
+		combat:StepBattle()
+		local phaseFlow = self.Phase == "Resolve"
+		self:BeginNextTurn()
+		phaseFlow = phaseFlow and self.Phase == "Placement" and self.TurnNumber == 2 and self.CurrentCost == 4
+		allPassed = self:RecordMakerRegression("PhaseFlowAndCarry", phaseFlow) and allPassed
+
+		self:ResetBattle()
+		local map = self.Entity.CurrentMap
+		local slot = map:GetChildByName("PlayerSlot_1")
+		local accepted = self:TryPlaceCardForOwner(1, slot.TransformComponent.WorldPosition, 2, "MakerRegression")
+		local spent = accepted and self.CurrentCost == 0 and self.PendingCount == 1
+		self:CancelPlacementAt(1, "MakerRegression", "RegressionCancel")
+		local refunded = self.CurrentCost == 2 and self.PendingCount == 0 and self.UsedCardMask == "0000000"
+		allPassed = self:RecordMakerRegression("CostSpendCancelRefund", spent and refunded) and allPassed
+
+		self:ResetBattle()
+		self.CurrentCost = 9
+		self.EnemyCurrentCost = 9
+		self:BeginNextTurn()
+		allPassed = self:RecordMakerRegression(
+			"CostCap",
+			self.CurrentCost == 10 and self.EnemyCurrentCost == 10
+		) and allPassed
+
+		self:ResetBattle()
+		self:BeginNextTurn()
+		self:BeginNextTurn()
+		local enemyPlan = self.TurnNumber == 3
+			and self.CurrentCost == 6
+			and self.EnemyCurrentCost == 1
+			and self.EnemyPendingCount == 1
+		allPassed = self:RecordMakerRegression("IndependentEnemyTurn3Plan", enemyPlan) and allPassed
+
+		self:ResetBattle()
+		local confirmSlot = map:GetChildByName("PlayerSlot_1")
+		local confirmAccepted = self:TryPlaceCardForOwner(
+			1,
+			confirmSlot.TransformComponent.WorldPosition,
+			1,
+			"MakerRegression"
+		)
+		self:EnterReveal()
+		local confirmPassed = confirmAccepted
+			and self.Phase == "Reveal"
+			and self.PendingCount == 0
+			and combat:CountActiveUnits() == 1
+		allPassed = self:RecordMakerRegression("PlacementConfirm", confirmPassed) and allPassed
+
+		local timeoutConfigured = self.BattleTimeLimit == 60 and combat.BattleTimeLimitTicks == 3600
+		allPassed = self:RecordMakerRegression("Battle60SecondTimeoutConfig", timeoutConfigured) and allPassed
+
+		self.PlayerNexusHp = 1
+		self.EnemyNexusHp = 2
+		self.CurrentCost = 0
+		self:ResetBattle()
+		local restartPassed = self.PlayerNexusHp == 30
+			and self.EnemyNexusHp == 30
+			and self.CurrentCost == 2
+			and self.EnemyCurrentCost == 2
+			and self.TurnNumber == 1
+			and self.Phase == "Placement"
+		allPassed = self:RecordMakerRegression("Restart", restartPassed) and allPassed
+		combat.MakerHarnessRunning = false
+
+		if allPassed then
+			log("[ThreeLaneBoard][REGRESSION][ALL] PASS")
+		else
+			log_error("[ThreeLaneBoard][REGRESSION][ALL] FAIL")
+		end
+		return allPassed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RecordMakerRegression(string name, boolean passed)
+		-- 회귀 항목별 PASS/FAIL을 같은 로그 형식으로 기록한다.
+		if passed then
+			log("[ThreeLaneBoard][REGRESSION][" .. name .. "] PASS")
+		else
+			log_error("[ThreeLaneBoard][REGRESSION][" .. name .. "] FAIL")
+		end
+		return passed
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearSlots()
+		-- 15개 플레이어 슬롯의 점유 상태와 기본 색을 복구한다.
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then
+			return
+		end
 
 		for index = 1, 15 do
-			local slotName = "PlayerSlot_" .. tostring(index)
-			local slotEntity = self.Entity.CurrentMap:GetChildByName(slotName)
+			local slotEntity = map:GetChildByName("PlayerSlot_" .. tostring(index))
 			if isvalid(slotEntity) then
 				---@type ThreeLaneSlot
 				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
@@ -237,9 +942,6 @@ script ThreeLaneBoard extends Component
 				end
 			end
 		end
-
-		self:RefreshWorldText()
-		log("[ThreeLaneBoard] Battle reset - PlayerHP=30, EnemyHP=30, Turn=1, Cost=2/10")
 	end
 
 	@ExecSpace("ServerOnly")
@@ -257,28 +959,13 @@ script ThreeLaneBoard extends Component
 		self.UsedCardMask = mask
 	end
 
-	@ExecSpace("ServerOnly")
-	method void RefreshWorldText()
-		-- 월드 공간의 보조 텍스트를 현재 전투 결과와 체력에 맞춘다.
-		local hudEntity = self.Entity.CurrentMap:GetChildByName("PrototypeHud")
-		if not isvalid(hudEntity) or not isvalid(hudEntity.TextRendererComponent) then
-			return
+	method integer GetCardCost(integer cardIndex)
+		-- 카드 번호의 코스트를 반환한다. 범위를 벗어나면 0을 반환한다.
+		if cardIndex < 1 or cardIndex > 7 then
+			return 0
 		end
 
-		if self.BattleState == "Victory" then
-			hudEntity.TextRendererComponent.Text =
-				"승리! 적 수호석을 파괴했습니다.\n아래 RESTART를 눌러 다시 시작하세요."
-		elseif self.BattleState == "Defeat" then
-			hudEntity.TextRendererComponent.Text =
-				"패배! 플레이어 수호석이 파괴되었습니다.\n아래 RESTART를 눌러 다시 시작하세요."
-		else
-			hudEntity.TextRendererComponent.Text =
-				"PLAYER NEXUS "
-				.. tostring(self.PlayerNexusHp)
-				.. "\nENEMY NEXUS "
-				.. tostring(self.EnemyNexusHp)
-				.. "\n파란 슬롯을 눌러 슬라임을 출전시키세요."
-		end
+		return self.CardCosts[cardIndex]
 	end
 
 end

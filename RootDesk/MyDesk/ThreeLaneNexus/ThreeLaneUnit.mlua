@@ -1,67 +1,92 @@
 @Component
 script ThreeLaneUnit extends Component
 
+	property integer CombatUnitId = 0
+
 	property integer OwnerSide = 1
 
-	property integer Damage = 3
+	property integer LaneIndex = 1
 
-	property number MoveSpeed = 1.4
+	property integer SlotIndex = 1
 
-	property number TargetX = 5.35
+	property integer CardIndex = 5
 
-	property boolean HasResolved = false
+	property integer Cost = 5
+
+	property integer HP = 600
+
+	property integer MaxHP = 600
+
+	property integer Attack = 120
+
+	property integer AttackIntervalTicks = 72
+
+	property integer FirstAttackDelayTicks = 18
+
+	property number MoveSpeed = 1.0
+
+	property number AttackRange = 0.70
+
+	property integer NexusDamage = 5
+
+	property number SimX = 0
+
+	property number TargetNexusX = 5.35
+
+	property integer TargetCombatUnitId = 0
+
+	property integer LastTargetCombatUnitId = 0
+
+	property integer EngageTick = -1
+
+	property integer NextAttackTick = -1
+
+	property integer DeathTick = -1
+
+	property boolean Alive = true
+
+	property boolean Exited = false
+
+	property boolean PendingExit = false
+
+	property boolean IsTestUnit = false
+
+	property integer ForcedDeathTick = -1
+
+	property table AttackIntentTicks = {}
+
+	property table TargetHistory = {}
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
-		-- 생성된 유닛을 같은 라인의 적 수호석 방향으로 이동시킨다.
-		if isvalid(self.Entity.KinematicbodyComponent) then
-			self.Entity.KinematicbodyComponent.MoveVelocity = Vector2(self.MoveSpeed, 0)
-		end
-
-		log(
-			"[ThreeLaneUnit] OnBeginPlay - Damage="
-			.. tostring(self.Damage)
-			.. ", TargetX="
-			.. tostring(self.TargetX)
-		)
+		-- 전투 판정은 Combat만 수행하므로 소환 직후 시각 이동을 정지한다.
+		self:SetVisualVelocity(0)
+		log("[ThreeLaneUnit] OnBeginPlay - passive combat state ready")
 	end
 
 	@ExecSpace("ServerOnly")
-	method void OnUpdate(number delta)
-		-- 목표 지점 도달 시 한 번만 적 수호석 피해를 서버 보드에 전달한다.
-		if self.HasResolved then
-			return
-		end
+	method void ResetCombatState()
+		-- 새 전투 등록 시 대상·공격 예약·사망 상태를 기본값으로 되돌린다.
+		self.TargetCombatUnitId = 0
+		self.LastTargetCombatUnitId = 0
+		self.EngageTick = -1
+		self.NextAttackTick = -1
+		self.DeathTick = -1
+		self.Alive = true
+		self.Exited = false
+		self.PendingExit = false
+		self.ForcedDeathTick = -1
+		self.AttackIntentTicks = {}
+		self.TargetHistory = {}
+		self:SetVisualVelocity(0)
+	end
 
-		local boardEntity = self.Entity.CurrentMap:GetChildByName("PrototypeBoard")
-		if not isvalid(boardEntity) then
-			return
-		end
-
-		---@type ThreeLaneBoard
-		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
-		if not isvalid(board) then
-			return
-		end
-
-		if board.BattleState ~= "Playing" then
-			if isvalid(self.Entity.KinematicbodyComponent) then
-				self.Entity.KinematicbodyComponent.MoveVelocity = Vector2.zero
-			end
-			return
-		end
-
-		local currentX = self.Entity.TransformComponent.WorldPosition.x
-		if currentX < self.TargetX then
-			return
-		end
-
-		self.HasResolved = true
+	@ExecSpace("ServerOnly")
+	method void SetVisualVelocity(number signedSpeed)
+		-- Combat이 계산한 방향 속도만 Kinematicbody 시각 이동에 반영한다.
 		if isvalid(self.Entity.KinematicbodyComponent) then
-			self.Entity.KinematicbodyComponent.MoveVelocity = Vector2.zero
+			self.Entity.KinematicbodyComponent.MoveVelocity = Vector2(signedSpeed, 0)
 		end
-
-		board:ResolveEnemyNexusHit(self.Damage, self.Entity)
 	end
 
 end
