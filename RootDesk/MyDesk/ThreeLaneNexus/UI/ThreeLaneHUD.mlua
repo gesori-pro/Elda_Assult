@@ -1,0 +1,560 @@
+@Component
+script ThreeLaneHUD extends Component
+
+	property TextGUIRendererComponent TurnText = "9a1e9c4c-8e19-4907-a37e-414b6d65d72a"
+
+	property TextGUIRendererComponent TimerText = "71ca757a-45c9-41a2-b7bb-b04b7aaef8a8"
+
+	property TextGUIRendererComponent PlayerHpText = "2172aeda-fb50-4b8b-b646-8efd6973606c"
+
+	property TextGUIRendererComponent EnemyHpText = "b156395b-46a9-483b-8dec-ba8926fb44d6"
+
+	property TextGUIRendererComponent CostText = "667b425f-e727-4ad0-877a-2de023376e45"
+
+	property TextGUIRendererComponent CardHintText = "48ffe959-0e3c-4c8e-8351-78450d476a22"
+
+	property Entity RestartButton = "9200f53f-74c8-4a81-99d6-d490a6bc4a2e"
+
+	property Entity Card1 = "55de8a28-8fbb-4aa6-90b7-1c509b00f9b2"
+
+	property Entity Card2 = "4fbdebf7-8332-4b49-9b28-49027809e1e6"
+
+	property Entity Card3 = "d72e7abc-7e5d-47f6-86a7-f0a3a87b563f"
+
+	property Entity Card4 = "035912e6-dfb3-47c8-898e-0c9c8f1758d7"
+
+	property Entity Card5 = "395b65ff-6c57-49bb-ae67-d087c0131cee"
+
+	property Entity Card6 = "7f23a703-babc-40a4-bee3-c2f99635cbb4"
+
+	property Entity Card7 = "4d3090e4-9267-47dc-a82e-88a18552974a"
+
+	property Entity DragGhost = "12d9f41e-cf2b-4e00-90ae-d37341e26054"
+
+	property TextGUIRendererComponent DragGhostText = "150be69f-1580-4e61-b204-6994137a3026"
+
+	property integer SelectedCardIndex = 0
+
+	property integer ActiveCardIndex = 0
+
+	property integer ActiveTouchId = -999
+
+	property Vector2 DragStartPoint = Vector2(0, 0)
+
+	property boolean IsDragging = false
+
+	property number DragThreshold = 24
+
+	property number SnapRadius = 0.72
+
+	property number AmbiguityMargin = 0.12
+
+	property Entity SnapSlotEntity = ""
+
+	property table CardEntities = {}
+
+	property table CardDownHandlers = {}
+
+	property table CardDragHandlers = {}
+
+	property table CardUpHandlers = {}
+
+	property any RestartHandler = nil
+
+	property number RefreshAccumulator = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 카드 입력과 기존 HUD 버튼을 한 번만 연결한다.
+		self.CardEntities = {
+			self.Card1,
+			self.Card2,
+			self.Card3,
+			self.Card4,
+			self.Card5,
+			self.Card6,
+			self.Card7
+		}
+		self.CardDownHandlers = {}
+		self.CardDragHandlers = {}
+		self.CardUpHandlers = {}
+
+		for index, cardEntity in ipairs(self.CardEntities) do
+			local cardIndex = index
+			if isvalid(cardEntity) then
+				self.CardDownHandlers[index] = cardEntity:ConnectEvent(
+					UITouchDownEvent,
+					function(event)
+						self:OnCardTouchDown(cardIndex, event)
+					end
+				)
+				self.CardDragHandlers[index] = cardEntity:ConnectEvent(
+					UITouchDragEvent,
+					function(event)
+						self:OnCardTouchDrag(cardIndex, event)
+					end
+				)
+				self.CardUpHandlers[index] = cardEntity:ConnectEvent(
+					UITouchUpEvent,
+					function(event)
+						self:OnCardTouchUp(cardIndex, event)
+					end
+				)
+			end
+		end
+
+		if isvalid(self.RestartButton) then
+			self.RestartHandler = self.RestartButton:ConnectEvent(
+				ButtonClickEvent,
+				self.OnRestartClicked
+			)
+		end
+
+		if isvalid(self.DragGhost) then
+			self.DragGhost.Enable = false
+		end
+
+		self:SetCardHint("클릭: 선택 후 슬롯 터치  ·  드래그: 가까운 슬롯에 놓기")
+		self:RefreshHud()
+		log("[ThreeLaneHUD] OnBeginPlay - card click and magnetic drag ready")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 동기화된 전투 수치를 짧은 간격으로 HUD에 반영한다.
+		self.RefreshAccumulator = self.RefreshAccumulator + delta
+		if self.RefreshAccumulator < 0.1 then
+			return
+		end
+
+		self.RefreshAccumulator = 0
+		self:RefreshHud()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- UI가 내려갈 때 등록한 모든 이벤트 핸들러를 해제한다.
+		for index, cardEntity in ipairs(self.CardEntities) do
+			if isvalid(cardEntity) then
+				if self.CardDownHandlers[index] ~= nil then
+					cardEntity:DisconnectEvent(UITouchDownEvent, self.CardDownHandlers[index])
+				end
+				if self.CardDragHandlers[index] ~= nil then
+					cardEntity:DisconnectEvent(UITouchDragEvent, self.CardDragHandlers[index])
+				end
+				if self.CardUpHandlers[index] ~= nil then
+					cardEntity:DisconnectEvent(UITouchUpEvent, self.CardUpHandlers[index])
+				end
+			end
+		end
+
+		if isvalid(self.RestartButton) and self.RestartHandler ~= nil then
+			self.RestartButton:DisconnectEvent(ButtonClickEvent, self.RestartHandler)
+			self.RestartHandler = nil
+		end
+
+		self:ClearSnapTarget()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshHud()
+		-- 현재 맵의 보드 컴포넌트에서 동기화된 HUD 데이터를 읽는다.
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+			return
+		end
+
+		local boardEntity = localPlayer.CurrentMap:GetChildByName("PrototypeBoard")
+		if not isvalid(boardEntity) then
+			return
+		end
+
+		---@type ThreeLaneBoard
+		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
+		if not isvalid(board) then
+			return
+		end
+
+		if isvalid(self.TurnText) then
+			self.TurnText.Text = tostring(board.TurnNumber) .. "턴"
+		end
+
+		if isvalid(self.TimerText) then
+			local seconds = math.ceil(board.RemainingTime)
+			self.TimerText.Text = "남은 시간  " .. tostring(seconds) .. "초"
+		end
+
+		if isvalid(self.PlayerHpText) then
+			self.PlayerHpText.Text = tostring(board.PlayerNexusHp)
+		end
+
+		if isvalid(self.EnemyHpText) then
+			self.EnemyHpText.Text = tostring(board.EnemyNexusHp)
+		end
+
+		if isvalid(self.CostText) then
+			self.CostText.Text =
+				tostring(board.CurrentCost)
+				.. " / "
+				.. tostring(board.MaxCost)
+		end
+
+		self:RefreshCardVisuals(board.UsedCardMask)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardTouchDown(integer cardIndex, UITouchDownEvent event)
+		-- 한 손가락 또는 왼쪽 마우스 입력만 현재 카드 조작으로 소유한다.
+		if self.ActiveCardIndex ~= 0 then
+			return
+		end
+
+		if self:IsCardUsed(cardIndex) then
+			self:SetCardHint("이미 출전한 몬스터입니다.")
+			return
+		end
+
+		self.ActiveCardIndex = cardIndex
+		self.ActiveTouchId = event.TouchId
+		self.DragStartPoint = event.TouchPoint
+		self.IsDragging = false
+
+		if isvalid(self.DragGhostText) then
+			self.DragGhostText.Text = tostring(cardIndex)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardTouchDrag(integer cardIndex, UITouchDragEvent event)
+		-- 임계 거리 이상 움직인 입력만 드래그로 승격해 오조작을 줄인다.
+		if cardIndex ~= self.ActiveCardIndex or event.TouchId ~= self.ActiveTouchId then
+			return
+		end
+
+		local deltaX = event.TouchPoint.x - self.DragStartPoint.x
+		local deltaY = event.TouchPoint.y - self.DragStartPoint.y
+		local dragDistance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+		if not self.IsDragging and dragDistance < self.DragThreshold then
+			return
+		end
+
+		if not self.IsDragging then
+			self.IsDragging = true
+			self.SelectedCardIndex = cardIndex
+			if isvalid(self.DragGhost) then
+				self.DragGhost.Enable = true
+				_UILogic:SetSiblingIndex(self.DragGhost.UITransformComponent, 100)
+			end
+			log("[ThreeLaneHUD] Drag started - Card=" .. tostring(cardIndex))
+		end
+
+		self:MoveDragGhost(event.TouchPoint)
+		self:UpdateSnapTarget(event.TouchPoint)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardTouchUp(integer cardIndex, UITouchUpEvent event)
+		-- 탭은 선택으로, 드래그 종료는 자석 배치 또는 안전 취소로 처리한다.
+		if cardIndex ~= self.ActiveCardIndex or event.TouchId ~= self.ActiveTouchId then
+			return
+		end
+
+		if self.IsDragging then
+			self:MoveDragGhost(event.TouchPoint)
+			self:UpdateSnapTarget(event.TouchPoint)
+
+			local targetSlot = self.SnapSlotEntity
+			if isvalid(self.DragGhost) then
+				self.DragGhost.Enable = false
+			end
+			self:ClearSnapTarget()
+
+			if isvalid(targetSlot) then
+				self:RequestCardToSlot(cardIndex, targetSlot, "drag")
+			else
+				self.SelectedCardIndex = 0
+				self:SetCardHint("배치 취소: 슬롯 중앙에 더 가깝게 놓아 주세요.")
+				log("[ThreeLaneHUD] Drag cancelled - Card=" .. tostring(cardIndex))
+				self:RefreshCardVisuals(self:GetUsedCardMask())
+			end
+		else
+			self:SelectCard(cardIndex)
+		end
+
+		self.ActiveCardIndex = 0
+		self.ActiveTouchId = -999
+		self.IsDragging = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectCard(integer cardIndex)
+		-- 탭한 카드를 선택하고 같은 카드를 다시 탭하면 선택을 취소한다.
+		if cardIndex < 1 or cardIndex > 7 then
+			return
+		end
+
+		if self:IsCardUsed(cardIndex) then
+			self:SetCardHint("이미 출전한 몬스터입니다.")
+			return
+		end
+
+		if self.SelectedCardIndex == cardIndex then
+			self.SelectedCardIndex = 0
+			self:SetCardHint("선택을 취소했습니다.")
+			log("[ThreeLaneHUD] Card deselected - Card=" .. tostring(cardIndex))
+		else
+			self.SelectedCardIndex = cardIndex
+			self:SetCardHint(
+				"몬스터 "
+				.. tostring(cardIndex)
+				.. " 선택 · 파란 슬롯을 터치하세요."
+			)
+			log("[ThreeLaneHUD] Card selected - Card=" .. tostring(cardIndex))
+		end
+
+		self:RefreshCardVisuals(self:GetUsedCardMask())
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean RequestSelectedCardToSlot(Entity slotEntity)
+		-- 월드 슬롯 터치 경로에서 현재 선택 카드를 배치 요청으로 연결한다.
+		if self.SelectedCardIndex == 0 then
+			self:SetCardHint("먼저 하단의 몬스터를 선택하세요.")
+			log("[ThreeLaneHUD] Slot click ignored - no selected card")
+			return false
+		end
+
+		return self:RequestCardToSlot(self.SelectedCardIndex, slotEntity, "click")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean RequestCardToSlot(integer cardIndex, Entity slotEntity, string inputSource)
+		-- 선택 카드와 슬롯을 검증한 뒤 맵 엔티티의 서버 RPC를 호출한다.
+		if cardIndex < 1 or cardIndex > 7 or not isvalid(slotEntity) then
+			return false
+		end
+
+		if self:IsCardUsed(cardIndex) then
+			self:SetCardHint("이미 출전한 몬스터입니다.")
+			return false
+		end
+
+		---@type ThreeLaneSlot
+		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(slot) then
+			self:SetCardHint("배치할 수 없는 위치입니다.")
+			return false
+		end
+
+		if slot.IsOccupied then
+			self:SetCardHint("이미 사용 중인 슬롯입니다.")
+			return false
+		end
+
+		slot:RequestPlaceUnit(cardIndex)
+		self.SelectedCardIndex = 0
+		self:SetCardHint(
+			"배치 요청: 몬스터 "
+				.. tostring(cardIndex)
+				.. " → 슬롯 "
+				.. tostring(slot.SlotIndex)
+		)
+		log(
+			"[ThreeLaneHUD] Placement requested - Source="
+				.. inputSource
+				.. ", Card="
+				.. tostring(cardIndex)
+				.. ", Slot="
+				.. tostring(slot.SlotIndex)
+		)
+		self:RefreshCardVisuals(self:GetUsedCardMask())
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MoveDragGhost(Vector2 screenPoint)
+		-- 손가락 또는 마우스 위치를 루트 UI 좌표로 변환해 고스트를 이동한다.
+		if not isvalid(self.DragGhost) then
+			return
+		end
+
+		local uiPosition = _UILogic:ScreenToUIPosition(screenPoint)
+		self.DragGhost.UITransformComponent.anchoredPosition = uiPosition
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateSnapTarget(Vector2 screenPoint)
+		-- 가장 가까운 빈 슬롯을 찾되 두 슬롯 사이가 애매하면 스냅하지 않는다.
+		self:ClearSnapTarget()
+
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+			return
+		end
+
+		local worldPoint = _UILogic:ScreenToWorldPosition(screenPoint)
+		local nearestSlot = nil
+		local nearestDistance = 999999
+		local secondDistance = 999999
+
+		for index = 1, 15 do
+			local slotEntity = localPlayer.CurrentMap:GetChildByName(
+				"PlayerSlot_" .. tostring(index)
+			)
+			if isvalid(slotEntity) then
+				---@type ThreeLaneSlot
+				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+				if isvalid(slot) then
+					local slotPosition = slotEntity.TransformComponent.WorldPosition
+					local deltaX = worldPoint.x - slotPosition.x
+					local deltaY = worldPoint.y - slotPosition.y
+					local distance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+
+					if distance < nearestDistance then
+						secondDistance = nearestDistance
+						nearestDistance = distance
+						nearestSlot = slotEntity
+					elseif distance < secondDistance then
+						secondDistance = distance
+					end
+				end
+			end
+		end
+
+		if not isvalid(nearestSlot) or nearestDistance > self.SnapRadius then
+			return
+		end
+
+		---@type ThreeLaneSlot
+		local nearestSlotComponent = nearestSlot:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(nearestSlotComponent) then
+			return
+		end
+
+		if secondDistance <= self.SnapRadius
+			and secondDistance - nearestDistance < self.AmbiguityMargin then
+			self:SetCardHint("두 슬롯 사이입니다. 원하는 슬롯 중앙에 더 가깝게 놓아 주세요.")
+			return
+		end
+
+		if nearestSlotComponent.IsOccupied then
+			self:SetCardHint("가장 가까운 슬롯은 이미 사용 중입니다.")
+			return
+		end
+
+		self.SnapSlotEntity = nearestSlot
+		if isvalid(nearestSlot.SpriteRendererComponent) then
+			nearestSlot.SpriteRendererComponent.Color = Color(1.0, 0.78, 0.18, 1.0)
+		end
+
+		self:SetCardHint(
+			"스냅 대상: 슬롯 "
+				.. tostring(nearestSlotComponent.SlotIndex)
+				.. " · 놓으면 배치"
+		)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearSnapTarget()
+		-- 이전 스냅 후보의 미리보기 색을 원래 파란색으로 되돌린다.
+		if isvalid(self.SnapSlotEntity)
+			and isvalid(self.SnapSlotEntity.SpriteRendererComponent) then
+			self.SnapSlotEntity.SpriteRendererComponent.Color =
+				Color(0.25, 0.65, 1.0, 0.85)
+		end
+
+		self.SnapSlotEntity = nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsCardUsed(integer cardIndex)
+		-- 동기화된 7자리 사용 마스크에서 해당 카드의 출전 여부를 읽는다.
+		local mask = self:GetUsedCardMask()
+		if cardIndex < 1 or cardIndex > string.len(mask) then
+			return false
+		end
+
+		return string.sub(mask, cardIndex, cardIndex) == "1"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetUsedCardMask()
+		-- 보드가 아직 동기화되지 않은 경우 안전한 기본 마스크를 반환한다.
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+			return "0000000"
+		end
+
+		local boardEntity = localPlayer.CurrentMap:GetChildByName("PrototypeBoard")
+		if not isvalid(boardEntity) then
+			return "0000000"
+		end
+
+		---@type ThreeLaneBoard
+		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
+		if not isvalid(board) or board.UsedCardMask == nil then
+			return "0000000"
+		end
+
+		return board.UsedCardMask
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCardVisuals(string usedMask)
+		-- 사용 완료·선택·기본 상태를 서로 다른 색으로 구분한다.
+		if usedMask == nil or string.len(usedMask) < 7 then
+			usedMask = "0000000"
+		end
+
+		for index, cardEntity in ipairs(self.CardEntities) do
+			if isvalid(cardEntity) and isvalid(cardEntity.SpriteGUIRendererComponent) then
+				if string.sub(usedMask, index, index) == "1" then
+					cardEntity.SpriteGUIRendererComponent.Color =
+						Color(0.35, 0.37, 0.42, 0.72)
+				elseif self.SelectedCardIndex == index then
+					cardEntity.SpriteGUIRendererComponent.Color =
+						Color(1.0, 0.80, 0.28, 1.0)
+				else
+					cardEntity.SpriteGUIRendererComponent.Color =
+						Color(0.8667, 0.9490, 1.0, 1.0)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetCardHint(string message)
+		-- 조작 결과와 다음 행동을 카드 목록 상단에 즉시 안내한다.
+		if isvalid(self.CardHintText) then
+			self.CardHintText.Text = message
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRestartClicked(ButtonClickEvent event)
+		-- UI 재시작 버튼을 맵 엔티티의 서버 RPC에 연결한다.
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+			return
+		end
+
+		local restartEntity = localPlayer.CurrentMap:GetChildByName("PrototypeRestart")
+		if not isvalid(restartEntity) then
+			log_error("[ThreeLaneHUD] PrototypeRestart not found")
+			return
+		end
+
+		---@type ThreeLaneRestart
+		local restart = restartEntity:GetComponent("script.ThreeLaneRestart")
+		if not isvalid(restart) then
+			log_error("[ThreeLaneHUD] ThreeLaneRestart component not found")
+			return
+		end
+
+		self.SelectedCardIndex = 0
+		self:ClearSnapTarget()
+		restart:RequestRestart()
+		self:SetCardHint("전투를 처음부터 다시 시작했습니다.")
+	end
+
+end

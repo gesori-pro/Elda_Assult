@@ -1,0 +1,33 @@
+# Local credentials and tool configuration
+.env
+.env.*
+!.env.example
+Docs/
+config.toml
+.mcp.json
+.codex/
+.claude/
+.agents/
+.mswai/
+.gdd-working/
+
+# MSW engine-provided and read-only content
+Environment/
+Global/
+NativeScripts/
+
+# Local caches, logs, and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+~$*
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor metadata
+.idea/
+.vscode/

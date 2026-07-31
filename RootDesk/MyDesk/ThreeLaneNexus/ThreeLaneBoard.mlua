@@ -1,0 +1,284 @@
+@Component
+script ThreeLaneBoard extends Component
+
+	@Sync
+	property integer PlayerNexusHp = 30
+
+	@Sync
+	property integer EnemyNexusHp = 30
+
+	@Sync
+	property string BattleState = "Playing"
+
+	@Sync
+	property integer TurnNumber = 1
+
+	@Sync
+	property integer RemainingTime = 30
+
+	@Sync
+	property integer CurrentCost = 2
+
+	@Sync
+	property integer MaxCost = 10
+
+	@Sync
+	property string UsedCardMask = "0000000"
+
+	property string UnitModelId = "threelaneprototypeunit"
+
+	property integer SpawnSerial = 0
+
+	property table ActiveUnits = {}
+
+	property table UsedCards = {}
+
+	property boolean TurnTimerRunning = false
+
+	property number TurnElapsed = 0
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 서버 전투 상태를 초기화하고 프로토타입 시작을 기록한다.
+		log("[ThreeLaneBoard] OnBeginPlay - Phase 1 prototype ready")
+		self:ResetBattle()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 진행 중인 턴 타이머를 초 단위로 감소시킨다.
+		if not self.TurnTimerRunning or self.BattleState ~= "Playing" then
+			return
+		end
+
+		self.TurnElapsed = self.TurnElapsed + delta
+		if self.TurnElapsed < 1 then
+			return
+		end
+
+		local elapsedSeconds = math.floor(self.TurnElapsed)
+		self.TurnElapsed = self.TurnElapsed - elapsedSeconds
+		self.RemainingTime = self.RemainingTime - elapsedSeconds
+		if self.RemainingTime > 0 then
+			return
+		end
+
+		self.RemainingTime = 0
+		self.TurnElapsed = 0
+		self.TurnTimerRunning = false
+		log("[ThreeLaneBoard] Turn timer expired - Turn=" .. tostring(self.TurnNumber))
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TrySpawnPlayerUnit(integer slotIndex, Vector3 spawnPosition, integer cardIndex)
+		-- 카드와 전투 상태를 검증하고 선택된 슬롯에 프로토타입 유닛을 생성한다.
+		if self.BattleState ~= "Playing" then
+			log("[ThreeLaneBoard] Spawn rejected - battle is " .. self.BattleState)
+			return false
+		end
+
+		if cardIndex < 1 or cardIndex > 7 then
+			log("[ThreeLaneBoard] Spawn rejected - invalid card " .. tostring(cardIndex))
+			return false
+		end
+
+		if self.UsedCards[cardIndex] == true then
+			log("[ThreeLaneBoard] Spawn rejected - card already used " .. tostring(cardIndex))
+			return false
+		end
+
+		self.SpawnSerial = self.SpawnSerial + 1
+		local unitName =
+			"PlayerPrototypeUnit_C"
+			.. tostring(cardIndex)
+			.. "_"
+			.. tostring(self.SpawnSerial)
+		local map = self.Entity.CurrentMap
+		local unit = _SpawnService:SpawnByModelId(
+			self.UnitModelId,
+			unitName,
+			spawnPosition,
+			map
+		)
+
+		if not isvalid(unit) then
+			log_error("[ThreeLaneBoard] SpawnByModelId failed for slot " .. tostring(slotIndex))
+			return false
+		end
+
+		---@type ThreeLaneUnit
+		local unitComponent = unit:GetComponent("script.ThreeLaneUnit")
+		if not isvalid(unitComponent) then
+			log_error("[ThreeLaneBoard] Spawned unit has no ThreeLaneUnit")
+			_EntityService:Destroy(unit)
+			return false
+		end
+
+		unitComponent.OwnerSide = 1
+		unitComponent.Damage = 3
+		unitComponent.TargetX = 5.35
+		table.insert(self.ActiveUnits, unit)
+		self.UsedCards[cardIndex] = true
+		self:RefreshUsedCardMask()
+
+		log(
+			"[ThreeLaneBoard] Spawned card "
+			.. tostring(cardIndex)
+			.. " from slot "
+			.. tostring(slotIndex)
+			.. " at "
+			.. tostring(spawnPosition)
+		)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResolveEnemyNexusHit(integer damage, Entity sourceUnit)
+		-- 플레이어 유닛의 최후의 일격을 적 수호석 체력과 승리 판정에 반영한다.
+		if self.BattleState ~= "Playing" then
+			return
+		end
+
+		self.EnemyNexusHp = self.EnemyNexusHp - damage
+		if self.EnemyNexusHp < 0 then
+			self.EnemyNexusHp = 0
+		end
+
+		log(
+			"[ThreeLaneBoard] Enemy Nexus hit: -"
+			.. tostring(damage)
+			.. ", HP="
+			.. tostring(self.EnemyNexusHp)
+		)
+
+		if isvalid(sourceUnit) then
+			_EntityService:Destroy(sourceUnit)
+		end
+
+		if self.EnemyNexusHp <= 0 then
+			self.BattleState = "Victory"
+			self.TurnTimerRunning = false
+			self:StopActiveUnits()
+			log("[ThreeLaneBoard] RESULT=Victory")
+		end
+
+		self:RefreshWorldText()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResolvePlayerNexusHit(integer damage)
+		-- 적 공격 피해를 플레이어 수호석 체력과 패배 판정에 반영한다.
+		if self.BattleState ~= "Playing" then
+			return
+		end
+
+		self.PlayerNexusHp = self.PlayerNexusHp - damage
+		if self.PlayerNexusHp < 0 then
+			self.PlayerNexusHp = 0
+		end
+
+		log(
+			"[ThreeLaneBoard] Player Nexus hit: -"
+			.. tostring(damage)
+			.. ", HP="
+			.. tostring(self.PlayerNexusHp)
+		)
+
+		if self.PlayerNexusHp <= 0 then
+			self.BattleState = "Defeat"
+			self.TurnTimerRunning = false
+			self:StopActiveUnits()
+			log("[ThreeLaneBoard] RESULT=Defeat")
+		end
+
+		self:RefreshWorldText()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StopActiveUnits()
+		-- 승패가 결정되면 남아 있는 모든 유닛의 이동을 멈춘다.
+		for _, unit in ipairs(self.ActiveUnits) do
+			if isvalid(unit) and isvalid(unit.KinematicbodyComponent) then
+				unit.KinematicbodyComponent.MoveVelocity = Vector2.zero
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetBattle()
+		-- 전투·카드·슬롯 상태를 초기값으로 되돌려 처음부터 재도전하게 한다.
+		for _, unit in ipairs(self.ActiveUnits) do
+			if isvalid(unit) then
+				_EntityService:Destroy(unit)
+			end
+		end
+
+		self.ActiveUnits = {}
+		self.UsedCards = {}
+		self.UsedCardMask = "0000000"
+		self.PlayerNexusHp = 30
+		self.EnemyNexusHp = 30
+		self.BattleState = "Playing"
+		self.TurnNumber = 1
+		self.RemainingTime = 30
+		self.TurnElapsed = 0
+		self.CurrentCost = 2
+		self.MaxCost = 10
+		self.TurnTimerRunning = true
+
+		for index = 1, 15 do
+			local slotName = "PlayerSlot_" .. tostring(index)
+			local slotEntity = self.Entity.CurrentMap:GetChildByName(slotName)
+			if isvalid(slotEntity) then
+				---@type ThreeLaneSlot
+				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+				if isvalid(slot) then
+					slot:ResetSlot()
+				end
+			end
+		end
+
+		self:RefreshWorldText()
+		log("[ThreeLaneBoard] Battle reset - PlayerHP=30, EnemyHP=30, Turn=1, Cost=2/10")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshUsedCardMask()
+		-- 서버의 사용 카드 테이블을 클라이언트용 7자리 동기화 문자열로 변환한다.
+		local mask = ""
+		for index = 1, 7 do
+			if self.UsedCards[index] == true then
+				mask = mask .. "1"
+			else
+				mask = mask .. "0"
+			end
+		end
+
+		self.UsedCardMask = mask
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshWorldText()
+		-- 월드 공간의 보조 텍스트를 현재 전투 결과와 체력에 맞춘다.
+		local hudEntity = self.Entity.CurrentMap:GetChildByName("PrototypeHud")
+		if not isvalid(hudEntity) or not isvalid(hudEntity.TextRendererComponent) then
+			return
+		end
+
+		if self.BattleState == "Victory" then
+			hudEntity.TextRendererComponent.Text =
+				"승리! 적 수호석을 파괴했습니다.\n아래 RESTART를 눌러 다시 시작하세요."
+		elseif self.BattleState == "Defeat" then
+			hudEntity.TextRendererComponent.Text =
+				"패배! 플레이어 수호석이 파괴되었습니다.\n아래 RESTART를 눌러 다시 시작하세요."
+		else
+			hudEntity.TextRendererComponent.Text =
+				"PLAYER NEXUS "
+				.. tostring(self.PlayerNexusHp)
+				.. "\nENEMY NEXUS "
+				.. tostring(self.EnemyNexusHp)
+				.. "\n파란 슬롯을 눌러 슬라임을 출전시키세요."
+		end
+	end
+
+end

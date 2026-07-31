@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://1c81c4848b9b4addb2dc1a7d4ec1a234",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://1c81c4848b9b4addb2dc1a7d4ec1a234",
+      "name": "ThreeLaneNexus",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}

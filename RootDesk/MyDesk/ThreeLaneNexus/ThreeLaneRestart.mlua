@@ -1,0 +1,31 @@
+@Component
+script ThreeLaneRestart extends Component
+
+	@ExecSpace("ClientOnly")
+	@EventSender("Self")
+	handler HandleTouchEvent(TouchEvent event)
+		-- 월드 공간의 재시작 터치를 서버 재시작 요청으로 연결한다.
+		self:RequestRestart()
+	end
+
+	@ExecSpace("Server")
+	method void RequestRestart()
+		-- 서버의 보드 컴포넌트를 찾아 전투 전체를 초기화한다.
+		local boardEntity = self.Entity.CurrentMap:GetChildByName("PrototypeBoard")
+		if not isvalid(boardEntity) then
+			log_error("[ThreeLaneRestart] PrototypeBoard not found")
+			return
+		end
+
+		---@type ThreeLaneBoard
+		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
+		if not isvalid(board) then
+			log_error("[ThreeLaneRestart] ThreeLaneBoard component not found")
+			return
+		end
+
+		board:ResetBattle()
+		log("[ThreeLaneRestart] Restart requested")
+	end
+
+end

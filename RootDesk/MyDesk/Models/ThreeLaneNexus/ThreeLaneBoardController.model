@@ -1,0 +1,67 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "model://threelaneboardcontroller",
+  "ContentType": "x-mod/model",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "Version": 1,
+      "Name": "ThreeLaneBoardController",
+      "BaseModelId": null,
+      "Id": "threelaneboardcontroller",
+      "Components": [
+        "MOD.Core.TransformComponent",
+        "script.ThreeLaneBoard"
+      ],
+      "Properties": [],
+      "Values": [
+        {
+          "TargetType": "script.ThreeLaneBoard",
+          "Name": "PlayerNexusHp",
+          "ValueType": {
+            "$type": "MODNativeType",
+            "type": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+          },
+          "Value": 30
+        },
+        {
+          "TargetType": "script.ThreeLaneBoard",
+          "Name": "EnemyNexusHp",
+          "ValueType": {
+            "$type": "MODNativeType",
+            "type": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+          },
+          "Value": 30
+        },
+        {
+          "TargetType": "script.ThreeLaneBoard",
+          "Name": "BattleState",
+          "ValueType": {
+            "$type": "MODNativeType",
+            "type": "System.String, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+          },
+          "Value": "Playing"
+        },
+        {
+          "TargetType": "script.ThreeLaneBoard",
+          "Name": "UnitModelId",
+          "ValueType": {
+            "$type": "MODNativeType",
+            "type": "System.String, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+          },
+          "Value": "threelaneprototypeunit"
+        }
+      ],
+      "EventLinks": [],
+      "Children": []
+    }
+  }
+}

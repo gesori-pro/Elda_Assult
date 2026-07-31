@@ -1,0 +1,90 @@
+@Component
+script ThreeLaneSlot extends Component
+
+	property integer SlotIndex = 1
+
+	@Sync
+	property boolean IsOccupied = false
+
+	@ExecSpace("ClientOnly")
+	@EventSender("Self")
+	handler HandleTouchEvent(TouchEvent event)
+		-- 월드 슬롯 터치를 HUD의 현재 선택 카드 배치 경로로 전달한다.
+		if self.IsOccupied then
+			log("[ThreeLaneSlot] Slot click ignored - occupied: " .. tostring(self.SlotIndex))
+			return
+		end
+
+		local hudEntity = _EntityService:GetEntityByPath("/ui/ThreeLaneHUD/Controller")
+		if not isvalid(hudEntity) then
+			log_error("[ThreeLaneSlot] ThreeLaneHUD Controller not found")
+			return
+		end
+
+		---@type ThreeLaneHUD
+		local hud = hudEntity:GetComponent("script.ThreeLaneHUD")
+		if not isvalid(hud) then
+			log_error("[ThreeLaneSlot] ThreeLaneHUD component not found")
+			return
+		end
+
+		hud:RequestSelectedCardToSlot(self.Entity)
+	end
+
+	@ExecSpace("Server")
+	method void RequestPlaceUnit(integer cardIndex)
+		-- 서버에서 카드 번호와 슬롯 점유 상태를 다시 검증한 뒤 배치를 실행한다.
+		if cardIndex < 1 or cardIndex > 7 then
+			log("[ThreeLaneSlot] Invalid card index: " .. tostring(cardIndex))
+			return
+		end
+
+		if self.IsOccupied then
+			log("[ThreeLaneSlot] Slot already used: " .. tostring(self.SlotIndex))
+			return
+		end
+
+		local boardEntity = self.Entity.CurrentMap:GetChildByName("PrototypeBoard")
+		if not isvalid(boardEntity) then
+			log_error("[ThreeLaneSlot] PrototypeBoard not found")
+			return
+		end
+
+		---@type ThreeLaneBoard
+		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
+		if not isvalid(board) then
+			log_error("[ThreeLaneSlot] ThreeLaneBoard component not found")
+			return
+		end
+
+		local spawnPosition = self.Entity.TransformComponent.WorldPosition
+		local accepted = board:TrySpawnPlayerUnit(
+			self.SlotIndex,
+			spawnPosition,
+			cardIndex
+		)
+
+		if accepted then
+			self.IsOccupied = true
+			if isvalid(self.Entity.SpriteRendererComponent) then
+				self.Entity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
+			end
+			log(
+				"[ThreeLaneSlot] Slot occupied: "
+					.. tostring(self.SlotIndex)
+					.. ", Card="
+					.. tostring(cardIndex)
+			)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetSlot()
+		-- 재시작 시 슬롯 점유와 기본 파란색을 복구한다.
+		self.IsOccupied = false
+		if isvalid(self.Entity.SpriteRendererComponent) then
+			self.Entity.SpriteRendererComponent.Color = Color(0.25, 0.65, 1.0, 0.85)
+		end
+	end
+
+end
