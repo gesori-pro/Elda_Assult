@@ -60,6 +60,8 @@ script ThreeLaneBoard extends Component
 
 	property integer EnemyPlacementSerial = 0
 
+	property integer LastRevealEffectTurn = 0
+
 	property number PhaseElapsed = 0
 
 	property table PendingPlacements = {}
@@ -77,13 +79,18 @@ script ThreeLaneBoard extends Component
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
 		-- 서버 전투 상태를 초기화하고 Phase 2A 턴 기반 시작을 기록한다.
-		log("[ThreeLaneBoard] OnBeginPlay - Phase 2C-2 data-driven board authority ready")
+		log("[ThreeLaneBoard] OnBeginPlay - Phase 2C-3A reveal effect authority ready")
 		self:ResetBattle()
 	end
 
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
 		-- 승패가 확정되지 않은 동안 현재 페이즈를 진행한다.
+		local combat = self:GetCombat()
+		if isvalid(combat) and combat.MakerHarnessRunning then
+			return
+		end
+
 		if self.BattleState ~= "Playing" then
 			return
 		end
@@ -361,9 +368,15 @@ script ThreeLaneBoard extends Component
 
 	@ExecSpace("ServerOnly")
 	method void EnterReveal()
-		-- 양측의 비공개 명령을 공개하고 각각 기록된 순서로 같은 Reveal에서 소환한다.
+		-- 양측을 모두 소환한 뒤 전투 Tick 0 전에 진영별 배치 순서로 공개 효과를 해결한다.
 		self.Phase = "Reveal"
 		self.PhaseElapsed = 0
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[ThreeLaneBoard] EnterReveal failed - ThreeLaneCombat missing")
+			return
+		end
+		combat:PrepareReveal()
 		log(
 			"[ThreeLaneBoard] Phase=Reveal - Turn="
 			.. tostring(self.TurnNumber)
@@ -379,6 +392,8 @@ script ThreeLaneBoard extends Component
 		for _, command in ipairs(self.EnemyPendingPlacements) do
 			self:SpawnPlacement(command)
 		end
+
+		self:ResolveRevealEffects()
 
 		self.PendingPlacements = {}
 		self.PendingCount = 0
@@ -446,7 +461,10 @@ script ThreeLaneBoard extends Component
 		local laneIndex = math.floor((command.SlotIndex - 1) / 5) + 1
 		unitComponent.OwnerSide = ownerSide
 		unitComponent.LaneIndex = laneIndex
+		unitComponent.BaseLaneIndex = laneIndex
 		unitComponent.SlotIndex = command.SlotIndex
+		unitComponent.BaseSlotIndex = command.SlotIndex
+		unitComponent.PlacementOrder = command.Order
 		unitComponent.CardIndex = monster.CardIndex
 		unitComponent.MonsterId = monster.MonsterId
 		unitComponent.RangeClass = monster.RangeClass
@@ -454,12 +472,16 @@ script ThreeLaneBoard extends Component
 		unitComponent.HP = monster.HP
 		unitComponent.MaxHP = monster.HP
 		unitComponent.Attack = monster.Attack
+		unitComponent.BaseAttack = monster.Attack
+		unitComponent.CombatAttackBonus = 0
 		unitComponent.AttackIntervalTicks = monster.AttackIntervalTicks
 		unitComponent.FirstAttackDelayTicks = monster.FirstAttackDelayTicks
 		unitComponent.MoveSpeed = monster.MoveSpeed
 		unitComponent.AttackRange = monster.AttackRange
 		unitComponent.NexusDamage = monster.NexusDamage
 		unitComponent.SimX = command.Position.x
+		unitComponent.CombatStartX = command.Position.x
+		unitComponent.CombatStartY = command.Position.y
 		unitComponent.TargetNexusX = 5.35
 		if ownerSide == 2 then
 			unitComponent.TargetNexusX = -5.35
@@ -517,6 +539,280 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method boolean ResolveRevealEffects()
+		-- 모든 소환이 끝난 뒤 양 진영을 독립적으로 처리하고 Battle Tick은 건드리지 않는다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[Phase2C3A][Reveal] FAIL - ThreeLaneCombat missing")
+			return false
+		end
+		if self.LastRevealEffectTurn == self.TurnNumber then
+			log_warning("[Phase2C3A][Reveal] duplicate resolve ignored - Turn=" .. tostring(self.TurnNumber))
+			return false
+		end
+
+		local tickBefore = combat.SimTick
+		local playerSources = self:ResolveRevealEffectsForSide(1)
+		local enemySources = self:ResolveRevealEffectsForSide(2)
+		self.LastRevealEffectTurn = self.TurnNumber
+		local tickStable = tickBefore == 0 and combat.SimTick == 0 and not combat.IsRunning
+		if not tickStable then
+			log_error(
+				"[Phase2C3A][Reveal] FAIL - combat advanced before Battle. Before="
+				.. tostring(tickBefore)
+				.. ", After="
+				.. tostring(combat.SimTick)
+			)
+			return false
+		end
+
+		log(
+			"[Phase2C3A][Reveal] PASS - Turn="
+			.. tostring(self.TurnNumber)
+			.. ", PlayerSources="
+			.. tostring(playerSources)
+			.. ", EnemySources="
+			.. tostring(enemySources)
+			.. ", Tick=0"
+		)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ResolveRevealEffectsForSide(integer ownerSide)
+		-- 효과 소스를 PlacementOrder 오름차순, 동률은 CombatUnitId 오름차순으로 고정한다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			return 0
+		end
+		local sources = {}
+		local snapshot = combat:BuildStableSnapshot()
+		for _, unit in ipairs(snapshot) do
+			if unit.OwnerSide == ownerSide and unit.PlacementOrder > 0 then
+				local monster = self:GetMonsterById(unit.MonsterId)
+				if monster ~= nil
+					and monster.EffectType ~= ""
+					and monster.EffectType ~= "None"
+					and monster.EffectDuration == "CurrentCombat" then
+					table.insert(sources, { Unit = unit, Monster = monster })
+				end
+			end
+		end
+
+		table.sort(
+			sources,
+			function(a, b)
+				if a.Unit.PlacementOrder == b.Unit.PlacementOrder then
+					return a.Unit.CombatUnitId < b.Unit.CombatUnitId
+				end
+				return a.Unit.PlacementOrder < b.Unit.PlacementOrder
+			end
+		)
+
+		for _, source in ipairs(sources) do
+			self:ResolveRevealEffectSource(source.Unit, source.Monster)
+		end
+		return #sources
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResolveRevealEffectSource(any source, any monster)
+		-- 데이터 계약에 맞는 공개 시점 효과만 처리하고 미지원 효과는 이후 단계로 남긴다.
+		if source == nil or monster == nil then
+			return
+		end
+
+		if monster.EffectType == "MoveDownOneLane"
+			and monster.EffectTarget == "EarlierAllySameColumn" then
+			local candidates = self:GetRevealEffectCandidates(source, monster.EffectTarget)
+			if #candidates > 0 then
+				self:MoveRevealUnitDownOneLane(source, candidates[1])
+			else
+				log(
+					"[Phase2C3A][MoveDownOneLane] NoTarget Source="
+					.. tostring(source.CombatUnitId)
+					.. ", Order="
+					.. tostring(source.PlacementOrder)
+				)
+			end
+			return
+		end
+
+		if monster.EffectType == "AttackBuff"
+			and monster.EffectTarget == "EarlierAlliesMiddle" then
+			local candidates = self:GetRevealEffectCandidates(source, monster.EffectTarget)
+			local applied = 0
+			for _, target in ipairs(candidates) do
+				if applied >= monster.EffectMaxTargets then
+					break
+				end
+				self:ApplyRevealAttackBonus(source, target, monster.EffectValue)
+				applied = applied + 1
+			end
+			if applied == 0 then
+				log(
+					"[Phase2C3A][AttackBuff] NoTarget Source="
+					.. tostring(source.CombatUnitId)
+					.. ", Order="
+					.. tostring(source.PlacementOrder)
+				)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetRevealEffectCandidates(any source, string targetRule)
+		-- 앞순번 아군만 모은 뒤 현재 위치 기준 유효성을 검사하고 최근 배치 순으로 정렬한다.
+		local candidates = {}
+		local combat = self:GetCombat()
+		if source == nil or not isvalid(combat) then
+			return candidates
+		end
+
+		local sourceColumn = self:GetSlotColumn(source.SlotIndex)
+		local snapshot = combat:BuildStableSnapshot()
+		for _, candidate in ipairs(snapshot) do
+			local earlierAlly = candidate.CombatUnitId ~= source.CombatUnitId
+				and candidate.OwnerSide == source.OwnerSide
+				and candidate.PlacementOrder > 0
+				and candidate.PlacementOrder < source.PlacementOrder
+			if earlierAlly then
+				local valid = false
+				if targetRule == "EarlierAllySameColumn" then
+					local destinationSlot = candidate.SlotIndex + 5
+					valid = candidate.LaneIndex < 3
+						and self:GetSlotColumn(candidate.SlotIndex) == sourceColumn
+						and not self:IsRevealSlotOccupied(candidate.OwnerSide, destinationSlot, candidate.CombatUnitId)
+				elseif targetRule == "EarlierAlliesMiddle" then
+					valid = candidate.LaneIndex == 2
+				end
+				if valid then
+					table.insert(candidates, candidate)
+				end
+			end
+		end
+
+		table.sort(
+			candidates,
+			function(a, b)
+				if a.PlacementOrder == b.PlacementOrder then
+					return a.CombatUnitId < b.CombatUnitId
+				end
+				return a.PlacementOrder > b.PlacementOrder
+			end
+		)
+		return candidates
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsRevealSlotOccupied(integer ownerSide, integer slotIndex, integer ignoredCombatUnitId)
+		-- 현재 전투 위치에서 같은 진영의 목적지 점유를 검사하며 위치 교환은 허용하지 않는다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			return true
+		end
+		for _, unit in ipairs(combat:BuildStableSnapshot()) do
+			if unit.CombatUnitId ~= ignoredCombatUnitId
+				and unit.OwnerSide == ownerSide
+				and unit.SlotIndex == slotIndex then
+				return true
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MoveRevealUnitDownOneLane(any source, any target)
+		-- Slot·라인·논리 X·월드 위치·전투 시작 위치를 같은 목적지 값으로 원자적으로 갱신한다.
+		if source == nil or target == nil or target.LaneIndex >= 3 then
+			return
+		end
+		local destinationSlot = target.SlotIndex + 5
+		local slotPosition = self:GetSlotWorldPosition(target.OwnerSide, destinationSlot)
+		if slotPosition == nil then
+			log_error("[Phase2C3A][MoveDownOneLane] destination slot missing " .. tostring(destinationSlot))
+			return
+		end
+
+		local oldSlot = target.SlotIndex
+		target.SlotIndex = destinationSlot
+		target.LaneIndex = math.floor((destinationSlot - 1) / 5) + 1
+		target.SimX = slotPosition.x
+		target.CombatStartX = slotPosition.x
+		target.CombatStartY = slotPosition.y
+		if target.IsTestUnit ~= true and isvalid(target) and isvalid(target.Entity) then
+			target:SetVisualVelocity(0)
+			if isvalid(target.Entity.KinematicbodyComponent) then
+				target.Entity.KinematicbodyComponent:SetWorldPosition(Vector2(slotPosition.x, slotPosition.y))
+			else
+				target.Entity.TransformComponent.WorldPosition = slotPosition
+			end
+		end
+
+		log(
+			"[Phase2C3A][MoveDownOneLane] Source="
+			.. tostring(source.CombatUnitId)
+			.. ", Target="
+			.. tostring(target.CombatUnitId)
+			.. ", Order="
+			.. tostring(target.PlacementOrder)
+			.. ", Slot="
+			.. tostring(oldSlot)
+			.. "->"
+			.. tostring(destinationSlot)
+			.. ", Lane="
+			.. tostring(target.LaneIndex)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyRevealAttackBonus(any source, any target, integer amount)
+		-- 원본 공격력과 전투 보너스를 분리하고 HP·주기·수호석 피해·MonsterData는 건드리지 않는다.
+		if source == nil or target == nil then
+			return
+		end
+		local before = target.Attack
+		target.CombatAttackBonus = target.CombatAttackBonus + amount
+		target.Attack = target.BaseAttack + target.CombatAttackBonus
+		log(
+			"[Phase2C3A][AttackBuff] Source="
+			.. tostring(source.CombatUnitId)
+			.. ", Target="
+			.. tostring(target.CombatUnitId)
+			.. ", Order="
+			.. tostring(target.PlacementOrder)
+			.. ", Attack="
+			.. tostring(before)
+			.. "->"
+			.. tostring(target.Attack)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetSlotColumn(integer slotIndex)
+		-- 1~15 SlotId를 진영 관점의 1~5 열 번호로 변환한다.
+		return ((slotIndex - 1) % 5) + 1
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetSlotWorldPosition(integer ownerSide, integer slotIndex)
+		-- 플레이어·적의 현재 SlotId에 대응하는 실제 월드 좌표를 반환한다.
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then
+			return nil
+		end
+		local prefix = "PlayerSlot_"
+		if ownerSide == 2 then
+			prefix = "EnemySlot_"
+		end
+		local slot = map:GetChildByName(prefix .. tostring(slotIndex))
+		if not isvalid(slot) then
+			return nil
+		end
+		return slot.TransformComponent.WorldPosition
+	end
+
+	@ExecSpace("ServerOnly")
 	method void EnterBattle()
 		-- 페이즈 권위를 Battle로 바꾸고 단일 Combat 고정 Tick 시뮬레이션을 시작한다.
 		self.Phase = "Battle"
@@ -566,6 +862,7 @@ script ThreeLaneBoard extends Component
 
 		-- 배치 순서는 해당 턴 안에서만 의미를 가지므로 턴마다 폐기한다.
 		self.PlacementSerial = 0
+		self.LastRevealEffectTurn = 0
 		self.TurnNumber = self.TurnNumber + 1
 		local gained = self.CurrentCost + self.CostGainPerTurn
 		if gained > self.MaxCost then
@@ -724,6 +1021,7 @@ script ThreeLaneBoard extends Component
 		self.UsedCardMask = "0000000"
 		self.PlacementSerial = 0
 		self.EnemyPlacementSerial = 0
+		self.LastRevealEffectTurn = 0
 		self.PlayerNexusHp = 30
 		self.EnemyNexusHp = 30
 		self.BattleState = "Playing"
@@ -1108,6 +1406,378 @@ script ThreeLaneBoard extends Component
 			log_error("[Phase2C2][DATA][ALL] FAIL - see item logs")
 		end
 		return allPassed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2C3ARegression()
+		-- 공개 효과 11개 규칙 시나리오와 실제 엔티티 위치 갱신을 한 번에 검증한다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[Phase2C3A][TEST][ALL] FAIL - combat missing")
+			return false
+		end
+		combat.MakerHarnessRunning = true
+		local allPassed = true
+		local scenarios = {
+			"RibbonTopToMiddle",
+			"RibbonMiddleToBottom",
+			"RibbonBlockedDestination",
+			"RibbonNoTarget",
+			"BalrogTwoLatestMiddle",
+			"BalrogFewerTargets",
+			"RibbonThenBalrogChain",
+			"BalrogThenRibbonOrder",
+			"RevealNoEarlyCombatTick",
+			"SpeedDeterminism",
+			"NextTurnReset"
+		}
+
+		for _, scenarioName in ipairs(scenarios) do
+			local passed = self:RunPhase2C3AScenario(scenarioName)
+			allPassed = self:RecordPhase2C3ARegression(scenarioName, passed) and allPassed
+		end
+
+		local actualPassed = self:RunPhase2C3AActualSpawnRegression()
+		allPassed = self:RecordPhase2C3ARegression("ActualSpawnRevealState", actualPassed) and allPassed
+		self:ResetBattle()
+		combat.MakerHarnessRunning = false
+		if allPassed then
+			log("[Phase2C3A][TEST][ALL] PASS - normal play state restored")
+		else
+			log_error("[Phase2C3A][TEST][ALL] FAIL - see scenario logs")
+		end
+		return allPassed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean PreparePhase2C3ATestState()
+		-- 시나리오마다 레지스트리·Tick·턴 효과 가드를 초기화한다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			return false
+		end
+		combat.MakerHarnessRunning = true
+		self:ResetBattle()
+		combat.MakerHarnessRunning = true
+		self.Phase = "Reveal"
+		self.LastRevealEffectTurn = 0
+		combat:PrepareReveal()
+		return combat.SimTick == 0 and not combat.IsRunning
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C3AScenario(string scenarioName)
+		-- 각 시나리오는 동일한 효과 해결 메서드만 사용하며 테스트 전용 분기에서 결과를 조작하지 않는다.
+		if scenarioName == "SpeedDeterminism" then
+			local speed1 = self:BuildRevealDeterminismSignature(1)
+			local speed2 = self:BuildRevealDeterminismSignature(2)
+			log(
+				"[Phase2C3A][SpeedCompare] Speed1="
+				.. speed1
+				.. ", Speed2="
+				.. speed2
+				.. ", Equal="
+				.. tostring(speed1 ~= "" and speed1 == speed2)
+			)
+			return speed1 ~= "" and speed1 == speed2
+		end
+
+		if not self:PreparePhase2C3ATestState() then
+			return false
+		end
+		local combat = self:GetCombat()
+
+		if scenarioName == "RibbonTopToMiddle" then
+			local target = self:CreateRevealTestUnit("slime", 1, 1, 3)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 2, 13)
+			local resolved = self:ResolveRevealEffects()
+			return resolved and target ~= nil and target.SlotIndex == 8 and target.LaneIndex == 2
+		end
+
+		if scenarioName == "RibbonMiddleToBottom" then
+			local target = self:CreateRevealTestUnit("slime", 1, 1, 8)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 2, 3)
+			local resolved = self:ResolveRevealEffects()
+			return resolved and target ~= nil and target.SlotIndex == 13 and target.LaneIndex == 3
+		end
+
+		if scenarioName == "RibbonBlockedDestination" then
+			local top = self:CreateRevealTestUnit("slime", 1, 1, 3)
+			local middle = self:CreateRevealTestUnit("stone_golem", 1, 2, 8)
+			local ribbon = self:CreateRevealTestUnit("ribbon_pig", 1, 3, 13)
+			local resolved = self:ResolveRevealEffects()
+			return resolved
+				and top ~= nil and top.SlotIndex == 3
+				and middle ~= nil and middle.SlotIndex == 8
+				and ribbon ~= nil and ribbon.SlotIndex == 13
+		end
+
+		if scenarioName == "RibbonNoTarget" then
+			local bottom = self:CreateRevealTestUnit("slime", 1, 1, 13)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 2, 3)
+			local resolved = self:ResolveRevealEffects()
+			return resolved and bottom ~= nil and bottom.SlotIndex == 13
+		end
+
+		if scenarioName == "BalrogTwoLatestMiddle" then
+			local first = self:CreateRevealTestUnit("slime", 1, 1, 6)
+			local second = self:CreateRevealTestUnit("green_mushroom", 1, 2, 7)
+			local third = self:CreateRevealTestUnit("stone_golem", 1, 3, 8)
+			self:CreateRevealTestUnit("junior_balrog", 1, 4, 1)
+			local resolved = self:ResolveRevealEffects()
+			return resolved
+				and first ~= nil and first.CombatAttackBonus == 0 and first.Attack == first.BaseAttack
+				and second ~= nil and second.CombatAttackBonus == 30 and second.Attack == second.BaseAttack + 30
+				and third ~= nil and third.CombatAttackBonus == 30 and third.Attack == third.BaseAttack + 30
+		end
+
+		if scenarioName == "BalrogFewerTargets" then
+			local only = self:CreateRevealTestUnit("slime", 1, 1, 6)
+			local balrog = self:CreateRevealTestUnit("junior_balrog", 1, 2, 1)
+			local resolved = self:ResolveRevealEffects()
+			return resolved
+				and only ~= nil and only.CombatAttackBonus == 30 and only.Attack == only.BaseAttack + 30
+				and balrog ~= nil and balrog.CombatAttackBonus == 0
+		end
+
+		if scenarioName == "RibbonThenBalrogChain" then
+			local target = self:CreateRevealTestUnit("slime", 1, 1, 3)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 2, 13)
+			self:CreateRevealTestUnit("junior_balrog", 1, 3, 1)
+			local resolved = self:ResolveRevealEffects()
+			return resolved
+				and target ~= nil and target.SlotIndex == 8 and target.LaneIndex == 2
+				and target.CombatAttackBonus == 30 and target.Attack == target.BaseAttack + 30
+		end
+
+		if scenarioName == "BalrogThenRibbonOrder" then
+			local target = self:CreateRevealTestUnit("slime", 1, 1, 3)
+			self:CreateRevealTestUnit("junior_balrog", 1, 2, 1)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 3, 13)
+			local resolved = self:ResolveRevealEffects()
+			return resolved
+				and target ~= nil and target.SlotIndex == 8 and target.LaneIndex == 2
+				and target.CombatAttackBonus == 0 and target.Attack == target.BaseAttack
+		end
+
+		if scenarioName == "RevealNoEarlyCombatTick" then
+			self:CreateRevealTestUnit("slime", 1, 1, 3)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 2, 13)
+			local beforeTick = combat.SimTick
+			local resolved = self:ResolveRevealEffects()
+			return resolved and beforeTick == 0 and combat.SimTick == 0 and not combat.IsRunning
+		end
+
+		if scenarioName == "NextTurnReset" then
+			local oldTarget = self:CreateRevealTestUnit("slime", 1, 1, 3)
+			self:CreateRevealTestUnit("ribbon_pig", 1, 2, 13)
+			self:CreateRevealTestUnit("junior_balrog", 1, 3, 1)
+			local firstResolved = self:ResolveRevealEffects()
+			local oldChanged = firstResolved
+				and oldTarget ~= nil and oldTarget.SlotIndex == 8
+				and oldTarget.CombatAttackBonus == 30
+			oldTarget.Alive = false
+			oldTarget.Exited = true
+			for _, oldUnit in ipairs(combat.Units) do
+				oldUnit.Alive = false
+				oldUnit.Exited = true
+			end
+			self.TurnNumber = self.TurnNumber + 1
+			self.LastRevealEffectTurn = 0
+			combat:PrepareReveal()
+			local fresh = self:CreateRevealTestUnit("slime", 1, 1, 3)
+			return oldChanged
+				and fresh ~= nil
+				and fresh.SlotIndex == fresh.BaseSlotIndex
+				and fresh.LaneIndex == fresh.BaseLaneIndex
+				and fresh.Attack == fresh.BaseAttack
+				and fresh.CombatAttackBonus == 0
+		end
+
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method any CreateRevealTestUnit(string monsterId, integer ownerSide, integer placementOrder, integer slotIndex)
+		-- 실제 슬롯 좌표를 쓰는 테스트 테이블을 만들어 위치·공격력 효과를 같은 코어 경로로 검증한다.
+		local combat = self:GetCombat()
+		local position = self:GetSlotWorldPosition(ownerSide, slotIndex)
+		if not isvalid(combat) or position == nil then
+			return nil
+		end
+		local laneIndex = math.floor((slotIndex - 1) / 5) + 1
+		local unit = combat:CreateTestMonster(monsterId, ownerSide, laneIndex, position.x)
+		if unit == nil then
+			return nil
+		end
+		unit.PlacementOrder = placementOrder
+		unit.SlotIndex = slotIndex
+		unit.BaseSlotIndex = slotIndex
+		unit.LaneIndex = laneIndex
+		unit.BaseLaneIndex = laneIndex
+		unit.SimX = position.x
+		unit.CombatStartX = position.x
+		unit.CombatStartY = position.y
+		return unit
+	end
+
+	@ExecSpace("ServerOnly")
+	method string BuildRevealDeterminismSignature(integer speed)
+		-- 같은 배치 명령을 배속 값만 바꿔 두 번 해결하고 효과 결과만 직렬화한다.
+		if not self:PreparePhase2C3ATestState() then
+			return ""
+		end
+		self.SimSpeed = speed
+		self:CreateRevealTestUnit("slime", 1, 1, 3)
+		self:CreateRevealTestUnit("ribbon_pig", 1, 2, 13)
+		self:CreateRevealTestUnit("green_mushroom", 1, 3, 7)
+		self:CreateRevealTestUnit("junior_balrog", 1, 4, 1)
+		if not self:ResolveRevealEffects() then
+			return ""
+		end
+		return self:GetRevealStateSignature(1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetRevealStateSignature(integer ownerSide)
+		-- 배치 순서·현재 슬롯·라인·최종 공격력·보너스를 안정적인 문자열로 만든다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			return ""
+		end
+		local units = {}
+		for _, unit in ipairs(combat:BuildStableSnapshot()) do
+			if unit.OwnerSide == ownerSide and unit.PlacementOrder > 0 then
+				table.insert(units, unit)
+			end
+		end
+		table.sort(
+			units,
+			function(a, b)
+				if a.PlacementOrder == b.PlacementOrder then
+					return a.CombatUnitId < b.CombatUnitId
+				end
+				return a.PlacementOrder < b.PlacementOrder
+			end
+		)
+		local signature = ""
+		for _, unit in ipairs(units) do
+			signature = signature
+				.. tostring(unit.PlacementOrder)
+				.. ":"
+				.. unit.MonsterId
+				.. "@"
+				.. tostring(unit.SlotIndex)
+				.. "/L"
+				.. tostring(unit.LaneIndex)
+				.. "/A"
+				.. tostring(unit.Attack)
+				.. "+"
+				.. tostring(unit.CombatAttackBonus)
+				.. ";"
+		end
+		return signature
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C3AActualSpawnRegression()
+		-- 양 진영 실제 컴포넌트를 모두 소환한 뒤 Transform·논리 상태·원본 데이터 분리를 확인한다.
+		if not self:PreparePhase2C3ATestState() then
+			return false
+		end
+		local combat = self:GetCombat()
+		local data = self:GetData()
+		if not isvalid(combat) or not isvalid(data) then
+			return false
+		end
+
+		local ids = { "slime", "ribbon_pig", "junior_balrog" }
+		local slots = { 3, 13, 1 }
+		for ownerSide = 1, 2 do
+			for index = 1, 3 do
+				local monster = data:GetMonsterById(ids[index])
+				local position = self:GetSlotWorldPosition(ownerSide, slots[index])
+				if monster == nil or position == nil then
+					return false
+				end
+				self:SpawnPlacement(
+					{
+						Order = index,
+						CardIndex = monster.CardIndex,
+						MonsterId = monster.MonsterId,
+						Cost = monster.Cost,
+						SlotIndex = slots[index],
+						Position = position,
+						OwnerUserId = "Phase2C3ARegression",
+						OwnerSide = ownerSide
+					}
+				)
+			end
+		end
+
+		local resolved = self:ResolveRevealEffects()
+		local playerTarget = combat:GetUnitById(1)
+		local enemyTarget = combat:GetUnitById(4)
+		local playerSlot = self:GetSlotWorldPosition(1, 8)
+		local enemySlot = self:GetSlotWorldPosition(2, 8)
+		local slimeData = data:GetMonsterById("slime")
+		if not resolved
+			or playerTarget == nil or enemyTarget == nil
+			or playerSlot == nil or enemySlot == nil
+			or slimeData == nil then
+			return false
+		end
+
+		local playerWorld = playerTarget.Entity.TransformComponent.WorldPosition
+		local enemyWorld = enemyTarget.Entity.TransformComponent.WorldPosition
+		local passed = #combat.Units == 6
+			and combat.SimTick == 0 and not combat.IsRunning
+			and playerTarget.SlotIndex == 8 and playerTarget.LaneIndex == 2
+			and enemyTarget.SlotIndex == 8 and enemyTarget.LaneIndex == 2
+			and math.abs(playerTarget.SimX - playerSlot.x) <= 0.000001
+			and math.abs(enemyTarget.SimX - enemySlot.x) <= 0.000001
+			and math.abs(playerTarget.CombatStartX - playerSlot.x) <= 0.000001
+			and math.abs(playerTarget.CombatStartY - playerSlot.y) <= 0.000001
+			and math.abs(enemyTarget.CombatStartX - enemySlot.x) <= 0.000001
+			and math.abs(enemyTarget.CombatStartY - enemySlot.y) <= 0.000001
+			and math.abs(playerWorld.x - playerSlot.x) <= 0.000001
+			and math.abs(playerWorld.y - playerSlot.y) <= 0.000001
+			and math.abs(enemyWorld.x - enemySlot.x) <= 0.000001
+			and math.abs(enemyWorld.y - enemySlot.y) <= 0.000001
+			and playerTarget.Attack == playerTarget.BaseAttack + 30
+			and enemyTarget.Attack == enemyTarget.BaseAttack + 30
+			and playerTarget.CombatAttackBonus == 30
+			and enemyTarget.CombatAttackBonus == 30
+			and slimeData.Attack == playerTarget.BaseAttack
+			and playerTarget.NexusDamage == slimeData.NexusDamage
+			and enemyTarget.NexusDamage == slimeData.NexusDamage
+
+		log(
+			"[Phase2C3A][ActualSpawn] Units="
+			.. tostring(#combat.Units)
+			.. ", PlayerSlot="
+			.. tostring(playerTarget.SlotIndex)
+			.. ", EnemySlot="
+			.. tostring(enemyTarget.SlotIndex)
+			.. ", Attack="
+			.. tostring(playerTarget.BaseAttack)
+			.. "->"
+			.. tostring(playerTarget.Attack)
+			.. ", Tick="
+			.. tostring(combat.SimTick)
+		)
+		return passed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RecordPhase2C3ARegression(string name, boolean passed)
+		-- Phase 2C-3A 항목별 결과를 독립 로그 접두사로 기록한다.
+		if passed then
+			log("[Phase2C3A][TEST][" .. name .. "] PASS")
+		else
+			log_error("[Phase2C3A][TEST][" .. name .. "] FAIL")
+		end
+		return passed
 	end
 
 	@ExecSpace("ServerOnly")

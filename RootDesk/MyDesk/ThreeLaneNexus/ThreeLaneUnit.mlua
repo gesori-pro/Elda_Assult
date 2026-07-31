@@ -9,6 +9,12 @@ script ThreeLaneUnit extends Component
 
 	property integer SlotIndex = 1
 
+	property integer BaseSlotIndex = 1
+
+	property integer BaseLaneIndex = 1
+
+	property integer PlacementOrder = 0
+
 	property integer CardIndex = 5
 
 	property string MonsterId = "drake"
@@ -23,6 +29,10 @@ script ThreeLaneUnit extends Component
 
 	property integer Attack = 120
 
+	property integer BaseAttack = 120
+
+	property integer CombatAttackBonus = 0
+
 	property integer AttackIntervalTicks = 72
 
 	property integer FirstAttackDelayTicks = 18
@@ -34,6 +44,10 @@ script ThreeLaneUnit extends Component
 	property integer NexusDamage = 5
 
 	property number SimX = 0
+
+	property number CombatStartX = 0
+
+	property number CombatStartY = 0
 
 	property number TargetNexusX = 5.35
 

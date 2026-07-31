@@ -122,6 +122,19 @@ script ThreeLaneCombat extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method void PrepareReveal()
+		-- 새 Reveal에서 전투 Tick을 0으로 고정하되 이미 소환된 유닛 레지스트리는 유지한다.
+		self.IsRunning = false
+		self.SimAccumulator = 0
+		self.SimTick = 0
+		self.ActiveBattleLimitTicks = self.BattleTimeLimitTicks
+		self.BacklogWarned = false
+		self.BacklogWarningCount = 0
+		self:StopAllVisuals()
+		log("[ThreeLaneCombat] PrepareReveal - Tick=0, Running=false")
+	end
+
+	@ExecSpace("ServerOnly")
 	method void SetSimulationSpeed(number speed)
 		-- 처리 Tick 수에만 영향을 주도록 배속을 1 또는 2로 정규화한다.
 		if speed ~= 2 then
@@ -964,7 +977,10 @@ script ThreeLaneCombat extends Component
 			CombatUnitId = 0,
 			OwnerSide = ownerSide,
 			LaneIndex = laneIndex,
+			BaseLaneIndex = laneIndex,
 			SlotIndex = 8,
+			BaseSlotIndex = 8,
+			PlacementOrder = 0,
 			CardIndex = monster.CardIndex,
 			MonsterId = monster.MonsterId,
 			RangeClass = monster.RangeClass,
@@ -972,12 +988,16 @@ script ThreeLaneCombat extends Component
 			HP = monster.HP,
 			MaxHP = monster.HP,
 			Attack = monster.Attack,
+			BaseAttack = monster.Attack,
+			CombatAttackBonus = 0,
 			AttackIntervalTicks = monster.AttackIntervalTicks,
 			FirstAttackDelayTicks = monster.FirstAttackDelayTicks,
 			MoveSpeed = monster.MoveSpeed,
 			AttackRange = monster.AttackRange,
 			NexusDamage = monster.NexusDamage,
 			SimX = simX,
+			CombatStartX = simX,
+			CombatStartY = 0,
 			TargetNexusX = 5.35,
 			TargetCombatUnitId = 0,
 			LastTargetCombatUnitId = 0,
