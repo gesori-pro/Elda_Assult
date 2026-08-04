@@ -1,5 +1,6 @@
 @Component
 script ThreeLaneHUD extends Component
+-- Phase 2C-4B: Mulligan, instance hand, draw/burn, and permanent slot HUD.
 
 	property TextGUIRendererComponent TurnText = "9a1e9c4c-8e19-4907-a37e-414b6d65d72a"
 
@@ -41,37 +42,31 @@ script ThreeLaneHUD extends Component
 
 	property Entity DragGhost = "12d9f41e-cf2b-4e00-90ae-d37341e26054"
 
-	property TextGUIRendererComponent DragGhostText = "150be69f-1580-4e61-b204-6994137a3026"
-
-	property table CardCosts = { 1, 2, 3, 4, 5, 6, 8 }
-
-	property integer SelectedCardIndex = 0
-
-	property integer SelectedReservedSlot = 0
-
-	property integer ActiveCardIndex = 0
-
-	property integer ActiveTouchId = -999
-
-	property Vector2 DragStartPoint = Vector2(0, 0)
-
-	property boolean IsDragging = false
-
-	property number DragThreshold = 24
-
-	property number SnapRadius = 0.72
-
-	property number AmbiguityMargin = 0.12
-
-	property Entity SnapSlotEntity = ""
-
 	property table CardEntities = {}
+
+	property table VisualRecordBySlot = {}
+
+	property table HandCards = {}
+
+	property table InstalledCards = {}
+
+	property table MulliganSelectedIds = {}
+
+	property table MulliganCardEntities = {}
+
+	property table PermanentMarkerEntities = {}
 
 	property table CardDownHandlers = {}
 
 	property table CardDragHandlers = {}
 
 	property table CardUpHandlers = {}
+
+	property table CardEnterHandlers = {}
+
+	property table CardExitHandlers = {}
+
+	property table MulliganHandlers = {}
 
 	property any RestartHandler = nil
 
@@ -83,107 +78,229 @@ script ThreeLaneHUD extends Component
 
 	property any Speed2Handler = nil
 
+	property any MulliganReplaceHandler = nil
+
+	property any MulliganKeepHandler = nil
+
+	property Entity MulliganOverlay = ""
+
+	property Entity MulliganReplaceButton = ""
+
+	property Entity MulliganKeepButton = ""
+
+	property Entity DrawGhost = ""
+
+	property Entity BurnToast = ""
+
+	property Entity CardDetailPanel = ""
+
+	property Entity PlayerPublicInfo = ""
+
+	property Entity EnemyPublicInfo = ""
+
+	property string SelectedCardInstanceId = ""
+
+	property integer SelectedVisualSlot = 0
+
+	property integer SelectedReservedSlot = 0
+
+	property integer ActiveVisualSlot = 0
+
+	property integer ActiveTouchId = -999
+
+	property Vector2 DragStartPoint = Vector2(0, 0)
+
+	property boolean IsDragging = false
+
+	property boolean LongPressTriggered = false
+
+	property number LongPressElapsed = 0
+
+	property string DetailInstanceId = ""
+
+	property string HoveredInstanceId = ""
+
+	property Entity SnapSlotEntity = ""
+
+	property number DragThreshold = 24
+
+	property number SnapRadius = 0.72
+
+	property number AmbiguityMargin = 0.12
+
+	property boolean MulliganConfirmedLocally = false
+
 	property number RefreshAccumulator = 0
+
+	property number DrawAnimationElapsed = -1
+
+	property number BurnToastRemaining = 0
+
+	property boolean PrivateSnapshotRequested = false
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
-		-- 카드 입력과 확정·재시작 버튼을 한 번만 연결한다.
-		self.CardEntities = {
-			self.Card1,
-			self.Card2,
-			self.Card3,
-			self.Card4,
-			self.Card5,
-			self.Card6,
-			self.Card7
-		}
-		self.CardDownHandlers = {}
-		self.CardDragHandlers = {}
-		self.CardUpHandlers = {}
+		-- 동적 4B UI는 경로로 찾고 기존 2A 조작 엔티티는 기존 바인딩을 유지한다.
+		self.CardEntities = { self.Card1, self.Card2, self.Card3, self.Card4, self.Card5, self.Card6, self.Card7 }
+		self.VisualRecordBySlot = {}
+		self.HandCards = {}
+		self.InstalledCards = {}
+		self.MulliganSelectedIds = {}
+		self.MulliganCardEntities = {}
+		self.PermanentMarkerEntities = {}
 
-		for index, cardEntity in ipairs(self.CardEntities) do
-			local cardIndex = index
-			if isvalid(cardEntity) then
-				self.CardDownHandlers[index] = cardEntity:ConnectEvent(
-					UITouchDownEvent,
-					function(event)
-						self:OnCardTouchDown(cardIndex, event)
-					end
-				)
-				self.CardDragHandlers[index] = cardEntity:ConnectEvent(
-					UITouchDragEvent,
-					function(event)
-						self:OnCardTouchDrag(cardIndex, event)
-					end
-				)
-				self.CardUpHandlers[index] = cardEntity:ConnectEvent(
-					UITouchUpEvent,
-					function(event)
-						self:OnCardTouchUp(cardIndex, event)
-					end
-				)
-			end
-		end
+		self.MulliganOverlay = self:GetHudEntity("MulliganOverlay")
+		self.MulliganReplaceButton = self:GetHudEntity("MulliganOverlay/Window/ReplaceButton")
+		self.MulliganKeepButton = self:GetHudEntity("MulliganOverlay/Window/KeepButton")
+		self.DrawGhost = self:GetHudEntity("DrawGhost")
+		self.BurnToast = self:GetHudEntity("BurnToast")
+		self.CardDetailPanel = self:GetHudEntity("CardDetailPanel")
+		self.PlayerPublicInfo = self:GetHudEntity("PlayerCardPublicInfo")
+		self.EnemyPublicInfo = self:GetHudEntity("EnemyCardPublicInfo")
 
-		if isvalid(self.RestartButton) then
-			self.RestartHandler = self.RestartButton:ConnectEvent(
-				ButtonClickEvent,
-				self.OnRestartClicked
-			)
-		end
+		self:ConnectHandCardEvents()
+		self:ConnectMulliganEvents()
+		self:ConnectButtonEvents()
 
-		if isvalid(self.ConfirmButton) then
-			self.ConfirmHandler = self.ConfirmButton:ConnectEvent(
-				ButtonClickEvent,
-				self.OnConfirmClicked
-			)
-		end
-
-		if isvalid(self.CancelButton) then
-			self.CancelHandler = self.CancelButton:ConnectEvent(
-				ButtonClickEvent,
-				self.OnCancelClicked
-			)
-		end
-
-		if isvalid(self.Speed1Button) then
-			self.Speed1Handler = self.Speed1Button:ConnectEvent(
-				ButtonClickEvent,
-				self.OnSpeed1Clicked
-			)
-		end
-
-		if isvalid(self.Speed2Button) then
-			self.Speed2Handler = self.Speed2Button:ConnectEvent(
-				ButtonClickEvent,
-				self.OnSpeed2Clicked
+		for index = 1, 15 do
+			self.PermanentMarkerEntities[index] = self:GetHudEntity(
+				"PermanentMarkers/Slot_" .. tostring(index)
 			)
 		end
 
 		if isvalid(self.DragGhost) then
 			self.DragGhost.Enable = false
 		end
+		if isvalid(self.DrawGhost) then
+			self.DrawGhost.Enable = false
+		end
+		if isvalid(self.BurnToast) then
+			self.BurnToast.Enable = false
+		end
+		if isvalid(self.CardDetailPanel) then
+			self.CardDetailPanel.Enable = false
+		end
 
-		self:SetCardHint("배치 단계 · 카드를 고른 뒤 슬롯을 터치하거나 드래그하세요.")
+		local board = self:GetBoard()
+		if board ~= nil then
+			board:RequestPrivateCardSnapshot()
+			self.PrivateSnapshotRequested = true
+		end
+		self:SetCardHint("첫 패 정보를 불러오는 중입니다.")
 		self:RefreshHud()
-		log("[ThreeLaneHUD] OnBeginPlay - phase HUD, cost gating and confirm button ready")
+		log("[Phase2C4B][HUD] OnBeginPlay - private hand UI requested")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectHandCardEvents()
+		self.CardDownHandlers = {}
+		self.CardDragHandlers = {}
+		self.CardUpHandlers = {}
+		self.CardEnterHandlers = {}
+		self.CardExitHandlers = {}
+		for index, cardEntity in ipairs(self.CardEntities) do
+			local visualSlot = index
+			if isvalid(cardEntity) then
+				self.CardDownHandlers[index] = cardEntity:ConnectEvent(
+					UITouchDownEvent,
+					function(event)
+						self:OnCardTouchDown(visualSlot, event)
+					end
+				)
+				self.CardDragHandlers[index] = cardEntity:ConnectEvent(
+					UITouchDragEvent,
+					function(event)
+						self:OnCardTouchDrag(visualSlot, event)
+					end
+				)
+				self.CardUpHandlers[index] = cardEntity:ConnectEvent(
+					UITouchUpEvent,
+					function(event)
+						self:OnCardTouchUp(visualSlot, event)
+					end
+				)
+				self.CardEnterHandlers[index] = cardEntity:ConnectEvent(
+					UITouchEnterEvent,
+					function(event)
+						self:OnCardTouchEnter(visualSlot, event)
+					end
+				)
+				self.CardExitHandlers[index] = cardEntity:ConnectEvent(
+					UITouchExitEvent,
+					function(event)
+						self:OnCardTouchExit(visualSlot, event)
+					end
+				)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectMulliganEvents()
+		self.MulliganHandlers = {}
+		for index = 1, 4 do
+			local cardEntity = self:GetHudEntity(
+				"MulliganOverlay/Window/Card_" .. tostring(index)
+			)
+			self.MulliganCardEntities[index] = cardEntity
+			local mulliganIndex = index
+			if isvalid(cardEntity) then
+				self.MulliganHandlers[index] = cardEntity:ConnectEvent(
+					UITouchDownEvent,
+					function(event)
+						self:ToggleMulliganCard(mulliganIndex)
+					end
+				)
+			end
+		end
+		if isvalid(self.MulliganReplaceButton) then
+			self.MulliganReplaceHandler = self.MulliganReplaceButton:ConnectEvent(
+				ButtonClickEvent,
+				self.OnMulliganReplaceClicked
+			)
+		end
+		if isvalid(self.MulliganKeepButton) then
+			self.MulliganKeepHandler = self.MulliganKeepButton:ConnectEvent(
+				ButtonClickEvent,
+				self.OnMulliganKeepClicked
+			)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectButtonEvents()
+		if isvalid(self.RestartButton) then
+			self.RestartHandler = self.RestartButton:ConnectEvent(ButtonClickEvent, self.OnRestartClicked)
+		end
+		if isvalid(self.ConfirmButton) then
+			self.ConfirmHandler = self.ConfirmButton:ConnectEvent(ButtonClickEvent, self.OnConfirmClicked)
+		end
+		if isvalid(self.CancelButton) then
+			self.CancelHandler = self.CancelButton:ConnectEvent(ButtonClickEvent, self.OnCancelClicked)
+		end
+		if isvalid(self.Speed1Button) then
+			self.Speed1Handler = self.Speed1Button:ConnectEvent(ButtonClickEvent, self.OnSpeed1Clicked)
+		end
+		if isvalid(self.Speed2Button) then
+			self.Speed2Handler = self.Speed2Button:ConnectEvent(ButtonClickEvent, self.OnSpeed2Clicked)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
-		-- 동기화된 전투 수치를 짧은 간격으로 HUD에 반영한다.
-		self.RefreshAccumulator = self.RefreshAccumulator + delta
-		if self.RefreshAccumulator < 0.1 then
-			return
-		end
+		self:UpdateLongPress(delta)
+		self:UpdateDrawAnimation(delta)
+		self:UpdateBurnToast(delta)
 
-		self.RefreshAccumulator = 0
-		self:RefreshHud()
+		self.RefreshAccumulator = self.RefreshAccumulator + delta
+		if self.RefreshAccumulator >= 0.1 then
+			self.RefreshAccumulator = 0
+			self:RefreshHud()
+		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnEndPlay()
-		-- UI가 내려갈 때 등록한 모든 이벤트 핸들러를 해제한다.
 		for index, cardEntity in ipairs(self.CardEntities) do
 			if isvalid(cardEntity) then
 				if self.CardDownHandlers[index] ~= nil then
@@ -195,779 +312,1083 @@ script ThreeLaneHUD extends Component
 				if self.CardUpHandlers[index] ~= nil then
 					cardEntity:DisconnectEvent(UITouchUpEvent, self.CardUpHandlers[index])
 				end
+				if self.CardEnterHandlers[index] ~= nil then
+					cardEntity:DisconnectEvent(UITouchEnterEvent, self.CardEnterHandlers[index])
+				end
+				if self.CardExitHandlers[index] ~= nil then
+					cardEntity:DisconnectEvent(UITouchExitEvent, self.CardExitHandlers[index])
+				end
 			end
 		end
-
-		if isvalid(self.RestartButton) and self.RestartHandler ~= nil then
-			self.RestartButton:DisconnectEvent(ButtonClickEvent, self.RestartHandler)
-			self.RestartHandler = nil
+		for index, cardEntity in ipairs(self.MulliganCardEntities) do
+			if isvalid(cardEntity) and self.MulliganHandlers[index] ~= nil then
+				cardEntity:DisconnectEvent(UITouchDownEvent, self.MulliganHandlers[index])
+			end
 		end
-
-		if isvalid(self.ConfirmButton) and self.ConfirmHandler ~= nil then
-			self.ConfirmButton:DisconnectEvent(ButtonClickEvent, self.ConfirmHandler)
-			self.ConfirmHandler = nil
-		end
-
-		if isvalid(self.CancelButton) and self.CancelHandler ~= nil then
-			self.CancelButton:DisconnectEvent(ButtonClickEvent, self.CancelHandler)
-			self.CancelHandler = nil
-		end
-
-		if isvalid(self.Speed1Button) and self.Speed1Handler ~= nil then
-			self.Speed1Button:DisconnectEvent(ButtonClickEvent, self.Speed1Handler)
-			self.Speed1Handler = nil
-		end
-
-		if isvalid(self.Speed2Button) and self.Speed2Handler ~= nil then
-			self.Speed2Button:DisconnectEvent(ButtonClickEvent, self.Speed2Handler)
-			self.Speed2Handler = nil
-		end
-
+		self:DisconnectButtons()
 		self:ClearSnapTarget()
 	end
 
 	@ExecSpace("ClientOnly")
+	method void DisconnectButtons()
+		if isvalid(self.RestartButton) and self.RestartHandler ~= nil then
+			self.RestartButton:DisconnectEvent(ButtonClickEvent, self.RestartHandler)
+		end
+		if isvalid(self.ConfirmButton) and self.ConfirmHandler ~= nil then
+			self.ConfirmButton:DisconnectEvent(ButtonClickEvent, self.ConfirmHandler)
+		end
+		if isvalid(self.CancelButton) and self.CancelHandler ~= nil then
+			self.CancelButton:DisconnectEvent(ButtonClickEvent, self.CancelHandler)
+		end
+		if isvalid(self.Speed1Button) and self.Speed1Handler ~= nil then
+			self.Speed1Button:DisconnectEvent(ButtonClickEvent, self.Speed1Handler)
+		end
+		if isvalid(self.Speed2Button) and self.Speed2Handler ~= nil then
+			self.Speed2Button:DisconnectEvent(ButtonClickEvent, self.Speed2Handler)
+		end
+		if isvalid(self.MulliganReplaceButton) and self.MulliganReplaceHandler ~= nil then
+			self.MulliganReplaceButton:DisconnectEvent(ButtonClickEvent, self.MulliganReplaceHandler)
+		end
+		if isvalid(self.MulliganKeepButton) and self.MulliganKeepHandler ~= nil then
+			self.MulliganKeepButton:DisconnectEvent(ButtonClickEvent, self.MulliganKeepHandler)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetHudEntity(string relativePath)
+		return _EntityService:GetEntityByPath("/ui/ThreeLaneHUD/" .. relativePath)
+	end
+
+	@ExecSpace("ClientOnly")
 	method ThreeLaneBoard GetBoard()
-		-- 현재 맵의 전투 보드 컴포넌트를 찾아 반환한다. 없으면 nil을 반환한다.
 		local localPlayer = _UserService.LocalPlayer
 		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
 			return nil
 		end
-
 		local boardEntity = localPlayer.CurrentMap:GetChildByName("PrototypeBoard")
 		if not isvalid(boardEntity) then
 			return nil
 		end
-
 		---@type ThreeLaneBoard
 		local board = boardEntity:GetComponent("script.ThreeLaneBoard")
 		if not isvalid(board) then
 			return nil
 		end
-
 		return board
 	end
 
 	@ExecSpace("ClientOnly")
+	method Entity GetSlotEntity(integer slotIndex)
+		if slotIndex < 1 or slotIndex > 15 then
+			return nil
+		end
+		local localPlayer = _UserService.LocalPlayer
+		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
+			return nil
+		end
+		return localPlayer.CurrentMap:GetChildByName("PlayerSlot_" .. tostring(slotIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method table SplitRecord(string value)
+		local fields = {}
+		if value == nil or value == "" then
+			return fields
+		end
+		for field in string.gmatch(value, "[^|]+") do
+			table.insert(fields, field)
+		end
+		return fields
+	end
+
+	@ExecSpace("ClientOnly")
+	method table ParseCardRecord(string value)
+		local fields = self:SplitRecord(value)
+		if #fields < 16 then
+			return nil
+		end
+		return {
+			InstanceId = fields[1], MonsterId = fields[2], CardIndex = tonumber(fields[3]) or 0,
+			Cost = tonumber(fields[4]) or 0, DevName = fields[5], RangeClass = fields[6],
+			EffectType = fields[7], State = fields[8], ImageRuid = fields[9],
+			HP = tonumber(fields[10]) or 0, Attack = tonumber(fields[11]) or 0,
+			AttackInterval = tonumber(fields[12]) or 0, MoveSpeed = tonumber(fields[13]) or 0,
+			NexusDamage = tonumber(fields[14]) or 0, NameKey = fields[15], EffectTextKey = fields[16],
+			ReservedSlotIndex = tonumber(fields[17]) or 0,
+			PermanentSlotIndex = tonumber(fields[17]) or 0,
+			VisualState = fields[18] or "Alive",
+			PlacementOrder = tonumber(fields[19]) or 0
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ReceivePrivateCardState(string payload, string eventType, string eventRecord)
+		-- 서버가 소유자에게만 보낸 손패·예약·영구 설치 스냅샷을 교체한다.
+		local separator = string.find(payload, "#", 1, true)
+		local handPart = payload
+		local installedPart = ""
+		if separator ~= nil then
+			handPart = string.sub(payload, 1, separator - 1)
+			installedPart = string.sub(payload, separator + 1)
+		end
+
+		local hand = {}
+		for recordText in string.gmatch(handPart, "[^;]+") do
+			local record = self:ParseCardRecord(recordText)
+			if record ~= nil then
+				table.insert(hand, record)
+			end
+		end
+		table.sort(hand, function(a, b)
+			if a.Cost ~= b.Cost then
+				return a.Cost < b.Cost
+			end
+			if a.MonsterId ~= b.MonsterId then
+				return a.MonsterId < b.MonsterId
+			end
+			return a.InstanceId < b.InstanceId
+		end)
+
+		local installed = {}
+		for recordText in string.gmatch(installedPart, "[^;]+") do
+			local record = self:ParseCardRecord(recordText)
+			if record ~= nil then
+				table.insert(installed, record)
+			end
+		end
+		self.HandCards = hand
+		self.InstalledCards = installed
+
+		if eventType == "Reset" then
+			self.MulliganSelectedIds = {}
+			self.MulliganConfirmedLocally = false
+			self.SelectedCardInstanceId = ""
+			self.SelectedVisualSlot = 0
+		elseif eventType == "MulliganRejected" then
+			self.MulliganConfirmedLocally = false
+			self:SetCardHint("리롤 요청이 거부되었습니다. 현재 첫 패를 다시 확인해 주세요.")
+		elseif eventType == "MulliganComplete" then
+			self.MulliganSelectedIds = {}
+			self:SetCardHint("첫 턴 드로우가 완료되었습니다. 손패에서 배치할 카드를 고르세요.")
+		elseif eventType == "Burn" then
+			self:ShowBurnToast(self:ParseCardRecord(eventRecord))
+		elseif eventType == "Draw" then
+			self:StartDrawAnimation(self:ParseCardRecord(eventRecord))
+		elseif eventType == "DeckEmpty" then
+			self:SetCardHint("덱이 비어 추가 드로우가 없습니다.")
+		elseif eventType == "Undo" then
+			self:SetCardHint("정확한 카드 복사본과 코스트가 손패로 돌아왔습니다.")
+		elseif eventType == "Install" then
+			self:SetCardHint("배치가 영구 설치되었습니다. 전투 후에도 슬롯을 유지합니다.")
+		end
+
+		self:RefreshHud()
+		log(
+			"[Phase2C4B][Private] Event=" .. eventType
+			.. ", Hand=" .. tostring(#self.HandCards)
+			.. ", Installed=" .. tostring(#self.InstalledCards)
+		)
+	end
+
+	@ExecSpace("ClientOnly")
 	method void RefreshHud()
-		-- 서버가 동기화한 턴·페이즈·코스트·전투 시간을 화면에 반영한다.
 		local board = self:GetBoard()
 		if board == nil then
 			return
+		end
+		if not self.PrivateSnapshotRequested then
+			self.PrivateSnapshotRequested = true
+			board:RequestPrivateCardSnapshot()
 		end
 
 		if isvalid(self.TurnText) then
 			self.TurnText.Text = tostring(board.TurnNumber) .. "턴"
 		end
-
 		if isvalid(self.PhaseText) then
 			self.PhaseText.Text = self:GetPhaseLabel(board)
 		end
-
 		if isvalid(self.TimerText) then
 			if board.BattleState ~= "Playing" then
 				self.TimerText.Text = "전투 종료"
+			elseif board.Phase == "Mulligan" then
+				self.TimerText.Text = "첫 패 선택 · 시간 제한 없음"
 			elseif board.Phase == "Battle" then
-				local seconds = math.ceil(board.BattleRemaining)
-				self.TimerText.Text = "전투 시간  " .. tostring(seconds) .. "초"
+				self.TimerText.Text = "전투 시간  " .. tostring(math.ceil(board.BattleRemaining)) .. "초"
 			else
 				self.TimerText.Text = "전투 대기"
 			end
 		end
-
 		if isvalid(self.PlayerHpText) then
 			self.PlayerHpText.Text = tostring(board.PlayerNexusHp)
 		end
-
 		if isvalid(self.EnemyHpText) then
 			self.EnemyHpText.Text = tostring(board.EnemyNexusHp)
 		end
-
 		if isvalid(self.CostText) then
-			self.CostText.Text =
-				tostring(board.CurrentCost)
-				.. " / "
-				.. tostring(board.MaxCost)
+			self.CostText.Text = tostring(board.CurrentCost) .. " / " .. tostring(board.MaxCost)
 		end
+
+		self:SetEntityText(
+			self.PlayerPublicInfo,
+			"패 " .. tostring(board.PlayerHandCount) .. "  덱 " .. tostring(board.PlayerDeckCount)
+			.. "\n설치 " .. tostring(board.PlayerInstalledCount) .. "  소실 " .. tostring(board.PlayerBurnedCount)
+		)
+		self:SetEntityText(
+			self.EnemyPublicInfo,
+			"패 " .. tostring(board.EnemyHandCount) .. "  덱 " .. tostring(board.EnemyDeckCount)
+			.. "\n설치 " .. tostring(board.EnemyInstalledCount) .. "  소실 " .. tostring(board.EnemyBurnedCount)
+		)
 
 		self:ValidateReservedSelection(board)
 		self:RefreshConfirmVisual(board)
 		self:RefreshCancelVisual(board)
 		self:RefreshSpeedVisual(board)
 		self:RefreshCardVisuals(board)
+		self:RefreshMulliganVisual(board)
+		self:RefreshPermanentSlots()
 	end
 
 	@ExecSpace("ClientOnly")
-	method Entity GetSlotEntity(integer slotIndex)
-		-- 슬롯 번호로 현재 맵의 플레이어 슬롯 엔티티를 찾는다.
-		if slotIndex < 1 or slotIndex > 15 then
-			return nil
+	method void SetEntityText(Entity entity, string value)
+		if isvalid(entity) and isvalid(entity.TextGUIRendererComponent) then
+			entity.TextGUIRendererComponent.Text = value
 		end
-
-		local localPlayer = _UserService.LocalPlayer
-		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
-			return nil
-		end
-
-		return localPlayer.CurrentMap:GetChildByName("PlayerSlot_" .. tostring(slotIndex))
-	end
-
-	@ExecSpace("ClientOnly")
-	method void SelectReservedSlot(Entity slotEntity)
-		-- 예약된 슬롯을 눌러 취소 대상으로 선택한다. 같은 슬롯을 다시 누르면 선택을 해제한다.
-		local board = self:GetBoard()
-		if board == nil then
-			return
-		end
-
-		if board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
-			self:SetCardHint("배치 단계에서만 예약을 취소할 수 있습니다.")
-			return
-		end
-
-		---@type ThreeLaneSlot
-		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
-		if not isvalid(slot) or not slot.IsOccupied then
-			return
-		end
-
-		if self.SelectedReservedSlot == slot.SlotIndex then
-			self:ClearReservedSelection()
-			self:SetCardHint("예약 선택을 해제했습니다.")
-			log("[ThreeLaneHUD] Reservation deselected - Slot=" .. tostring(slot.SlotIndex))
-			return
-		end
-
-		self:ClearReservedSelection()
-		self.SelectedReservedSlot = slot.SlotIndex
-		self.SelectedCardIndex = 0
-		self:ApplyReservedHighlight()
-		self:SetCardHint(
-			"예약 선택: 슬롯 "
-				.. tostring(slot.SlotIndex)
-				.. " · 버튼이 `슬롯 "
-				.. tostring(slot.SlotIndex)
-				.. " 취소`로 바뀝니다. 다시 누르면 선택 해제"
-		)
-		log("[ThreeLaneHUD] Reservation selected - Slot=" .. tostring(slot.SlotIndex))
-	end
-
-	@ExecSpace("ClientOnly")
-	method void ApplyReservedHighlight()
-		-- 선택된 예약 슬롯을 눈에 띄는 주황색으로 강조한다.
-		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
-		if isvalid(slotEntity) and isvalid(slotEntity.SpriteRendererComponent) then
-			slotEntity.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.20, 1.0)
-		end
-	end
-
-	@ExecSpace("ClientOnly")
-	method void ClearReservedSelection()
-		-- 예약 선택을 해제하고 슬롯 색을 점유 상태 기본색으로 되돌린다.
-		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
-		if isvalid(slotEntity) and isvalid(slotEntity.SpriteRendererComponent) then
-			---@type ThreeLaneSlot
-			local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
-			if isvalid(slot) and slot.IsOccupied then
-				slotEntity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
-			end
-		end
-
-		self.SelectedReservedSlot = 0
-	end
-
-	@ExecSpace("ClientOnly")
-	method void ValidateReservedSelection(ThreeLaneBoard board)
-		-- 페이즈가 바뀌거나 예약이 사라지면 선택 상태를 자동으로 정리한다.
-		if self.SelectedReservedSlot == 0 then
-			return
-		end
-
-		if board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
-			self:ClearReservedSelection()
-			return
-		end
-
-		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
-		if not isvalid(slotEntity) then
-			self.SelectedReservedSlot = 0
-			return
-		end
-
-		---@type ThreeLaneSlot
-		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
-		if not isvalid(slot) or not slot.IsOccupied then
-			self.SelectedReservedSlot = 0
-		end
-	end
-
-	@ExecSpace("ClientOnly")
-	method void RefreshCancelVisual(ThreeLaneBoard board)
-		-- 예약이 하나라도 있으면 버튼을 활성화한다. 선택이 없으면 마지막 예약 되돌리기로 동작한다.
-		if not isvalid(self.CancelButton) then
-			return
-		end
-
-		local usable = board.BattleState == "Playing"
-			and board.Phase == "Placement"
-			and board.PendingCount > 0
-
-		if isvalid(self.CancelButton.ButtonComponent) then
-			self.CancelButton.ButtonComponent.Enable = usable
-		end
-
-		if isvalid(self.CancelButton.TextGUIRendererComponent) then
-			if self.SelectedReservedSlot ~= 0 then
-				self.CancelButton.TextGUIRendererComponent.Text =
-					"슬롯 " .. tostring(self.SelectedReservedSlot) .. " 취소"
-			else
-				self.CancelButton.TextGUIRendererComponent.Text =
-					"되돌리기 (" .. tostring(board.PendingCount) .. ")"
-			end
-		end
-
-		if isvalid(self.CancelButton.SpriteGUIRendererComponent) then
-			if usable then
-				self.CancelButton.SpriteGUIRendererComponent.Color = Color(0.68, 0.24, 0.24, 1.0)
-			else
-				self.CancelButton.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.7)
-			end
-		end
-	end
-
-	@ExecSpace("ClientOnly")
-	method void OnCancelClicked(ButtonClickEvent event)
-		-- 선택한 예약이 있으면 그 예약을, 없으면 마지막 예약을 되돌린다.
-		local board = self:GetBoard()
-		if board == nil then
-			log_error("[ThreeLaneHUD] Cancel failed - board not found")
-			return
-		end
-
-		if board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
-			self:SetCardHint("배치 단계에서만 예약을 되돌릴 수 있습니다.")
-			return
-		end
-
-		if board.PendingCount <= 0 then
-			self:SetCardHint("되돌릴 예약 배치가 없습니다.")
-			return
-		end
-
-		if self.SelectedReservedSlot ~= 0 then
-			local slotIndex = self.SelectedReservedSlot
-			self:ClearReservedSelection()
-			board:RequestCancelPlacement(slotIndex)
-			self:SetCardHint(
-				"슬롯 " .. tostring(slotIndex) .. " 예약을 취소했습니다. 카드를 다시 쓸 수 있습니다."
-			)
-			log("[ThreeLaneHUD] Cancel requested - Slot=" .. tostring(slotIndex))
-			return
-		end
-
-		self:ClearReservedSelection()
-		board:RequestUndoPlacement()
-		self:SetCardHint("마지막 배치를 되돌렸습니다. 코스트가 환불됩니다.")
-		log("[ThreeLaneHUD] Undo requested - Pending=" .. tostring(board.PendingCount))
 	end
 
 	@ExecSpace("ClientOnly")
 	method string GetPhaseLabel(ThreeLaneBoard board)
-		-- 현재 전투 상태와 페이즈를 한 줄 안내 문구로 변환한다.
 		if board.BattleState == "Victory" then
 			return "승리 · 재시작 가능"
 		end
-
 		if board.BattleState == "Defeat" then
 			return "패배 · 재시작 가능"
 		end
-
 		if board.BattleState == "Draw" then
 			return "무승부 · 재시작 가능"
 		end
-
-		if board.Phase == "Placement" then
-			return "배치 단계 (" .. tostring(board.PendingCount) .. "기 대기)"
+		if board.Phase == "Mulligan" then
+			return "첫 패 선택"
 		end
-
+		if board.Phase == "Placement" then
+			return "배치 단계 (" .. tostring(board.PendingCount) .. "기 예약)"
+		end
 		if board.Phase == "Reveal" then
 			return "공개 단계"
 		end
-
 		if board.Phase == "Battle" then
 			return "전투 단계"
 		end
-
 		return "정산 단계"
 	end
 
 	@ExecSpace("ClientOnly")
-	method void RefreshConfirmVisual(ThreeLaneBoard board)
-		-- 배치 단계에서만 확정 버튼을 강조하고 그 외에는 흐리게 표시한다.
-		if not isvalid(self.ConfirmButton) then
+	method void SetCardEntityData(Entity cardEntity, table record)
+		if not isvalid(cardEntity) then
 			return
 		end
-
-		if not isvalid(self.ConfirmButton.SpriteGUIRendererComponent) then
+		if record == nil then
+			cardEntity.Enable = false
 			return
 		end
-
-		if board.BattleState == "Playing" and board.Phase == "Placement" then
-			self.ConfirmButton.SpriteGUIRendererComponent.Color = Color(0.16, 0.55, 0.32, 1.0)
-		else
-			self.ConfirmButton.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.7)
+		cardEntity.Enable = true
+		local portrait = cardEntity:GetChildByName("Portrait")
+		if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
+			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
+		end
+		self:SetEntityText(cardEntity:GetChildByName("Name"), record.DevName)
+		self:SetEntityText(cardEntity:GetChildByName("Cost"), tostring(record.Cost))
+		local rangeLabel = "근접"
+		if record.RangeClass == "Ranged" then
+			rangeLabel = "원거리"
+		end
+		self:SetEntityText(cardEntity:GetChildByName("Range"), rangeLabel)
+		local effectBadge = cardEntity:GetChildByName("EffectBadge")
+		if isvalid(effectBadge) then
+			effectBadge.Enable = record.EffectType ~= nil and record.EffectType ~= "" and record.EffectType ~= "None"
 		end
 	end
 
 	@ExecSpace("ClientOnly")
-	method void RefreshSpeedVisual(ThreeLaneBoard board)
-		-- 현재 선택된 배속 버튼을 항상 밝게 표시해 전투·대기 중 상태를 구분한다.
-		if isvalid(self.Speed1Button) and isvalid(self.Speed1Button.SpriteGUIRendererComponent) then
-			if board.SimSpeed == 1 then
-				self.Speed1Button.SpriteGUIRendererComponent.Color = Color(1.0, 0.80, 0.28, 1.0)
-				self.Speed1Button.TextGUIRendererComponent.FontColor = Color(0.10, 0.14, 0.19, 1.0)
-			else
-				self.Speed1Button.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.88)
-				self.Speed1Button.TextGUIRendererComponent.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+	method void RefreshCardVisuals(ThreeLaneBoard board)
+		self.VisualRecordBySlot = {}
+		for _, cardEntity in ipairs(self.CardEntities) do
+			if isvalid(cardEntity) then
+				cardEntity.Enable = false
 			end
 		end
-
-		if isvalid(self.Speed2Button) and isvalid(self.Speed2Button.SpriteGUIRendererComponent) then
-			if board.SimSpeed == 2 then
-				self.Speed2Button.SpriteGUIRendererComponent.Color = Color(1.0, 0.80, 0.28, 1.0)
-				self.Speed2Button.TextGUIRendererComponent.FontColor = Color(0.10, 0.14, 0.19, 1.0)
-			else
-				self.Speed2Button.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.88)
-				self.Speed2Button.TextGUIRendererComponent.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+		local count = #self.HandCards
+		if count > 7 then
+			count = 7
+		end
+		local startSlot = math.floor((7 - count) / 2) + 1
+		local placementOpen = board.BattleState == "Playing" and board.Phase == "Placement"
+		for index = 1, count do
+			local visualSlot = startSlot + index - 1
+			local record = self.HandCards[index]
+			local cardEntity = self.CardEntities[visualSlot]
+			self.VisualRecordBySlot[visualSlot] = record
+			self:SetCardEntityData(cardEntity, record)
+			if isvalid(cardEntity) and isvalid(cardEntity.SpriteGUIRendererComponent) then
+				if record.State == "Reserved" then
+					cardEntity.SpriteGUIRendererComponent.Color = Color(0.36, 0.42, 0.50, 0.88)
+				elseif not placementOpen then
+					cardEntity.SpriteGUIRendererComponent.Color = Color(0.45, 0.47, 0.52, 0.78)
+				elseif board.CurrentCost < record.Cost then
+					cardEntity.SpriteGUIRendererComponent.Color = Color(0.62, 0.42, 0.42, 0.88)
+				elseif self.SelectedCardInstanceId == record.InstanceId then
+					cardEntity.SpriteGUIRendererComponent.Color = Color(1.0, 0.80, 0.28, 1.0)
+				else
+					cardEntity.SpriteGUIRendererComponent.Color = Color(0.8667, 0.9490, 1.0, 1.0)
+				end
+				local reservedShade = cardEntity:GetChildByName("ReservedShade")
+				if isvalid(reservedShade) then
+					reservedShade.Enable = record.State == "Reserved"
+				end
+				local selection = cardEntity:GetChildByName("SelectionBorder")
+				if isvalid(selection) then
+					selection.Enable = self.SelectedCardInstanceId == record.InstanceId
+				end
 			end
 		end
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnCardTouchDown(integer cardIndex, UITouchDownEvent event)
-		-- 한 손가락 또는 왼쪽 마우스 입력만 현재 카드 조작으로 소유한다.
-		if self.ActiveCardIndex ~= 0 then
+	method void RefreshMulliganVisual(ThreeLaneBoard board)
+		if not isvalid(self.MulliganOverlay) then
+			return
+		end
+		local visible = board.BattleState == "Playing" and board.Phase == "Mulligan"
+		self.MulliganOverlay.Enable = visible
+		if not visible then
 			return
 		end
 
-		if not self:CanPickCard(cardIndex) then
-			return
+		for index = 1, 4 do
+			local record = self.HandCards[index]
+			local cardEntity = self.MulliganCardEntities[index]
+			self:SetCardEntityData(cardEntity, record)
+			if isvalid(cardEntity) then
+				local selected = record ~= nil and self.MulliganSelectedIds[record.InstanceId] == true
+				local selectedEntity = cardEntity:GetChildByName("Selected")
+				if isvalid(selectedEntity) then
+					selectedEntity.Enable = selected
+				end
+				local y = 30
+				if selected then
+					y = 52
+				end
+				cardEntity.UITransformComponent.anchoredPosition = Vector2(
+					cardEntity.UITransformComponent.anchoredPosition.x,
+					y
+				)
+			end
 		end
 
-		self.ActiveCardIndex = cardIndex
+		local selectedCount = self:GetMulliganSelectedCount()
+		if isvalid(self.MulliganReplaceButton) then
+			self:SetEntityText(self.MulliganReplaceButton, "선택 카드 교체 (" .. tostring(selectedCount) .. ")")
+			local usable = selectedCount > 0 and not self.MulliganConfirmedLocally
+			if isvalid(self.MulliganReplaceButton.ButtonComponent) then
+				self.MulliganReplaceButton.ButtonComponent.Enable = usable
+			end
+			if isvalid(self.MulliganReplaceButton.SpriteGUIRendererComponent) then
+				if usable then
+					self.MulliganReplaceButton.SpriteGUIRendererComponent.Color = Color(0.16, 0.48, 0.78, 1.0)
+				else
+					self.MulliganReplaceButton.SpriteGUIRendererComponent.Color = Color(0.35, 0.39, 0.46, 0.9)
+				end
+			end
+		end
+		if isvalid(self.MulliganKeepButton) and isvalid(self.MulliganKeepButton.ButtonComponent) then
+			self.MulliganKeepButton.ButtonComponent.Enable = not self.MulliganConfirmedLocally
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetMulliganSelectedCount()
+		local count = 0
+		for _, record in ipairs(self.HandCards) do
+			if self.MulliganSelectedIds[record.InstanceId] == true then
+				count = count + 1
+			end
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleMulliganCard(integer index)
+		local board = self:GetBoard()
+		if board == nil or board.Phase ~= "Mulligan" or self.MulliganConfirmedLocally then
+			return
+		end
+		local record = self.HandCards[index]
+		if record == nil then
+			return
+		end
+		self.MulliganSelectedIds[record.InstanceId] = self.MulliganSelectedIds[record.InstanceId] ~= true
+		self:RefreshMulliganVisual(board)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string BuildMulliganSelectionCsv()
+		local selected = {}
+		for _, record in ipairs(self.HandCards) do
+			if self.MulliganSelectedIds[record.InstanceId] == true then
+				table.insert(selected, record.InstanceId)
+			end
+		end
+		return table.concat(selected, ",")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnMulliganReplaceClicked(ButtonClickEvent event)
+		if self:GetMulliganSelectedCount() <= 0 then
+			return
+		end
+		self:SubmitMulligan(self:BuildMulliganSelectionCsv())
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnMulliganKeepClicked(ButtonClickEvent event)
+		self:SubmitMulligan("")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SubmitMulligan(string selectedCsv)
+		local board = self:GetBoard()
+		if board == nil or board.Phase ~= "Mulligan" or self.MulliganConfirmedLocally then
+			return
+		end
+		self.MulliganConfirmedLocally = true
+		board:RequestConfirmMulligan(selectedCsv)
+		self:SetCardHint("첫 패 선택을 확정했습니다. 서버 결과를 기다리는 중입니다.")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean CanPickVisualCard(integer visualSlot)
+		local record = self.VisualRecordBySlot[visualSlot]
+		if record == nil then
+			return false
+		end
+		local board = self:GetBoard()
+		if board == nil then
+			return false
+		end
+		if board.BattleState ~= "Playing" then
+			self:SetCardHint("전투가 끝났습니다. 재시작을 눌러 주세요.")
+			return false
+		end
+		if board.Phase ~= "Placement" then
+			self:SetCardHint("첫 패 선택이 끝난 배치 단계에서만 카드를 사용할 수 있습니다.")
+			return false
+		end
+		if record.State == "Reserved" then
+			self:SetCardHint("이미 예약 중인 카드 복사본입니다. 되돌리기로 회수할 수 있습니다.")
+			return false
+		end
+		if record.State ~= "Hand" then
+			return false
+		end
+		if board.CurrentCost < record.Cost then
+			self:SetCardHint("코스트가 부족합니다. 필요 " .. tostring(record.Cost) .. " · 보유 " .. tostring(board.CurrentCost))
+			return false
+		end
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardTouchDown(integer visualSlot, UITouchDownEvent event)
+		if self.ActiveVisualSlot ~= 0 or not self:CanPickVisualCard(visualSlot) then
+			return
+		end
+		self.ActiveVisualSlot = visualSlot
 		self.ActiveTouchId = event.TouchId
 		self.DragStartPoint = event.TouchPoint
 		self.IsDragging = false
-
-		if isvalid(self.DragGhostText) then
-			self.DragGhostText.Text = tostring(cardIndex)
-		end
+		self.LongPressTriggered = false
+		self.LongPressElapsed = 0
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnCardTouchDrag(integer cardIndex, UITouchDragEvent event)
-		-- 임계 거리 이상 움직인 입력만 드래그로 승격해 오조작을 줄인다.
-		if cardIndex ~= self.ActiveCardIndex or event.TouchId ~= self.ActiveTouchId then
+	method void OnCardTouchDrag(integer visualSlot, UITouchDragEvent event)
+		if visualSlot ~= self.ActiveVisualSlot or event.TouchId ~= self.ActiveTouchId then
 			return
 		end
-
 		local deltaX = event.TouchPoint.x - self.DragStartPoint.x
 		local deltaY = event.TouchPoint.y - self.DragStartPoint.y
-		local dragDistance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
-		if not self.IsDragging and dragDistance < self.DragThreshold then
+		local distance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+		if not self.IsDragging and distance < self.DragThreshold then
 			return
 		end
-
 		if not self.IsDragging then
 			self.IsDragging = true
-			self.SelectedCardIndex = cardIndex
+			self:HideCardDetails()
+			self.SelectedVisualSlot = visualSlot
+			local record = self.VisualRecordBySlot[visualSlot]
+			if record ~= nil then
+				self.SelectedCardInstanceId = record.InstanceId
+			end
 			if isvalid(self.DragGhost) then
+				self:SetCardEntityData(self.DragGhost, record)
 				self.DragGhost.Enable = true
 				_UILogic:SetSiblingIndex(self.DragGhost.UITransformComponent, 100)
 			end
-			log("[ThreeLaneHUD] Drag started - Card=" .. tostring(cardIndex))
 		end
-
 		self:MoveDragGhost(event.TouchPoint)
 		self:UpdateSnapTarget(event.TouchPoint)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnCardTouchUp(integer cardIndex, UITouchUpEvent event)
-		-- 탭은 선택으로, 드래그 종료는 자석 배치 또는 안전 취소로 처리한다.
-		if cardIndex ~= self.ActiveCardIndex or event.TouchId ~= self.ActiveTouchId then
+	method void OnCardTouchUp(integer visualSlot, UITouchUpEvent event)
+		if visualSlot ~= self.ActiveVisualSlot or event.TouchId ~= self.ActiveTouchId then
 			return
 		end
-
+		local record = self.VisualRecordBySlot[visualSlot]
 		if self.IsDragging then
 			self:MoveDragGhost(event.TouchPoint)
 			self:UpdateSnapTarget(event.TouchPoint)
-
 			local targetSlot = self.SnapSlotEntity
 			if isvalid(self.DragGhost) then
 				self.DragGhost.Enable = false
 			end
 			self:ClearSnapTarget()
-
 			if isvalid(targetSlot) then
-				self:RequestCardToSlot(cardIndex, targetSlot, "drag")
+				self:RequestCardToSlot(record, targetSlot, "drag")
 			else
-				self.SelectedCardIndex = 0
+				self.SelectedCardInstanceId = ""
+				self.SelectedVisualSlot = 0
 				self:SetCardHint("배치 취소: 슬롯 중앙에 더 가깝게 놓아 주세요.")
-				log("[ThreeLaneHUD] Drag cancelled - Card=" .. tostring(cardIndex))
 			end
+		elseif self.LongPressTriggered then
+			self:HideCardDetails()
 		else
-			self:SelectCard(cardIndex)
+			self:SelectVisualCard(visualSlot)
 		end
-
-		self.ActiveCardIndex = 0
+		self.ActiveVisualSlot = 0
 		self.ActiveTouchId = -999
 		self.IsDragging = false
+		self.LongPressTriggered = false
+		self.LongPressElapsed = 0
 	end
 
 	@ExecSpace("ClientOnly")
-	method boolean CanPickCard(integer cardIndex)
-		-- 페이즈·사용 여부·보유 코스트를 확인해 카드를 집을 수 있는지 판정한다.
-		if cardIndex < 1 or cardIndex > 7 then
-			return false
+	method void OnCardTouchEnter(integer visualSlot, UITouchEnterEvent event)
+		-- 음수 TouchId는 PC 마우스 입력이다. 모바일은 길게 누르기 경로만 사용한다.
+		if event.TouchId >= 0 then
+			return
 		end
-
-		local board = self:GetBoard()
-		if board == nil then
-			return false
+		local record = self.VisualRecordBySlot[visualSlot]
+		if record ~= nil then
+			self.HoveredInstanceId = record.InstanceId
+			self:ShowCardDetails(record)
 		end
-
-		if board.BattleState ~= "Playing" then
-			self:SetCardHint("전투가 끝났습니다. 재시작을 눌러 주세요.")
-			return false
-		end
-
-		if board.Phase ~= "Placement" then
-			self:SetCardHint("지금은 배치 단계가 아닙니다.")
-			return false
-		end
-
-		if self:IsCardUsed(cardIndex) then
-			self:SetCardHint("이번 턴에 이미 배치한 몬스터입니다.")
-			return false
-		end
-
-		local cost = self.CardCosts[cardIndex]
-		if board.CurrentCost < cost then
-			self:SetCardHint(
-				"코스트가 부족합니다. 필요 "
-					.. tostring(cost)
-					.. " · 보유 "
-					.. tostring(board.CurrentCost)
-			)
-			return false
-		end
-
-		return true
 	end
 
 	@ExecSpace("ClientOnly")
-	method void SelectCard(integer cardIndex)
-		-- 탭한 카드를 선택하고 같은 카드를 다시 탭하면 선택을 취소한다.
-		if self.SelectedCardIndex == cardIndex then
-			self.SelectedCardIndex = 0
+	method void OnCardTouchExit(integer visualSlot, UITouchExitEvent event)
+		local record = self.VisualRecordBySlot[visualSlot]
+		if record ~= nil and self.HoveredInstanceId == record.InstanceId then
+			self.HoveredInstanceId = ""
+			self:HideCardDetails()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateLongPress(number delta)
+		if self.ActiveVisualSlot == 0 or self.IsDragging or self.LongPressTriggered then
+			return
+		end
+		self.LongPressElapsed = self.LongPressElapsed + delta
+		if self.LongPressElapsed < 0.60 then
+			return
+		end
+		local record = self.VisualRecordBySlot[self.ActiveVisualSlot]
+		if record ~= nil then
+			self.LongPressTriggered = true
+			self:ShowCardDetails(record)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectVisualCard(integer visualSlot)
+		local record = self.VisualRecordBySlot[visualSlot]
+		if record == nil then
+			return
+		end
+		if self.SelectedCardInstanceId == record.InstanceId then
+			self.SelectedCardInstanceId = ""
+			self.SelectedVisualSlot = 0
 			self:SetCardHint("선택을 취소했습니다.")
-			log("[ThreeLaneHUD] Card deselected - Card=" .. tostring(cardIndex))
 			return
 		end
-
-		if not self:CanPickCard(cardIndex) then
+		if not self:CanPickVisualCard(visualSlot) then
 			return
 		end
-
 		self:ClearReservedSelection()
-		self.SelectedCardIndex = cardIndex
-		self:SetCardHint(
-			"몬스터 "
-			.. tostring(cardIndex)
-			.. " 선택 (코스트 "
-			.. tostring(self.CardCosts[cardIndex])
-			.. ") · 파란 슬롯을 터치하세요."
-		)
-		log("[ThreeLaneHUD] Card selected - Card=" .. tostring(cardIndex))
+		self.SelectedCardInstanceId = record.InstanceId
+		self.SelectedVisualSlot = visualSlot
+		self:SetCardHint(record.DevName .. " 선택 (코스트 " .. tostring(record.Cost) .. ") · 빈 슬롯을 터치하세요.")
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetSelectedCardRecord()
+		for _, record in ipairs(self.HandCards) do
+			if record.InstanceId == self.SelectedCardInstanceId then
+				return record
+			end
+		end
+		return nil
 	end
 
 	@ExecSpace("ClientOnly")
 	method boolean RequestSelectedCardToSlot(Entity slotEntity)
-		-- 월드 슬롯 터치 경로에서 현재 선택 카드를 배치 요청으로 연결한다.
-		if self.SelectedCardIndex == 0 then
-			self:SetCardHint("먼저 하단의 몬스터를 선택하세요.")
-			log("[ThreeLaneHUD] Slot click ignored - no selected card")
+		local record = self:GetSelectedCardRecord()
+		if record == nil then
+			self:SetCardHint("먼저 하단 손패에서 카드를 선택하세요.")
 			return false
 		end
-
-		return self:RequestCardToSlot(self.SelectedCardIndex, slotEntity, "click")
+		return self:RequestCardToSlot(record, slotEntity, "click")
 	end
 
 	@ExecSpace("ClientOnly")
-	method boolean RequestCardToSlot(integer cardIndex, Entity slotEntity, string inputSource)
-		-- 선택 카드와 슬롯을 검증한 뒤 맵 슬롯 엔티티의 서버 RPC를 호출한다.
-		if not isvalid(slotEntity) then
+	method boolean RequestCardToSlot(table record, Entity slotEntity, string inputSource)
+		if record == nil or not isvalid(slotEntity) then
 			return false
 		end
-
-		if not self:CanPickCard(cardIndex) then
+		local visualSlot = self:FindVisualSlotByInstance(record.InstanceId)
+		if visualSlot == 0 or not self:CanPickVisualCard(visualSlot) then
 			return false
 		end
-
 		---@type ThreeLaneSlot
 		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
 		if not isvalid(slot) then
-			self:SetCardHint("배치할 수 없는 위치입니다.")
 			return false
 		end
-
 		if slot.IsOccupied then
-			self:SetCardHint("이미 사용 중인 슬롯입니다.")
+			self:SetCardHint("이미 영구 설치 또는 예약 중인 슬롯입니다.")
 			return false
 		end
-
-		slot:RequestPlaceUnit(cardIndex)
-		self.SelectedCardIndex = 0
-		self:SetCardHint(
-			"배치 예약: 몬스터 "
-				.. tostring(cardIndex)
-				.. " → 슬롯 "
-				.. tostring(slot.SlotIndex)
-				.. " · 확정하면 소환, `되돌리기`로 취소"
-		)
-		log(
-			"[ThreeLaneHUD] Placement requested - Source="
-				.. inputSource
-				.. ", Card="
-				.. tostring(cardIndex)
-				.. ", Slot="
-				.. tostring(slot.SlotIndex)
-		)
+		local board = self:GetBoard()
+		if board == nil then
+			return false
+		end
+		board:RequestPlaceCardInstance(slot.SlotIndex, record.InstanceId)
+		self.SelectedCardInstanceId = ""
+		self.SelectedVisualSlot = 0
+		self:SetCardHint("배치 예약: " .. record.DevName .. " → 슬롯 " .. tostring(slot.SlotIndex) .. " · 확정 전 되돌리기 가능")
+		log("[Phase2C4B][Placement] Source=" .. inputSource .. ", Instance=" .. record.InstanceId .. ", Slot=" .. tostring(slot.SlotIndex))
 		return true
 	end
 
 	@ExecSpace("ClientOnly")
-	method void MoveDragGhost(Vector2 screenPoint)
-		-- 손가락 또는 마우스 위치를 루트 UI 좌표로 변환해 고스트를 이동한다.
-		if not isvalid(self.DragGhost) then
-			return
+	method integer FindVisualSlotByInstance(string instanceId)
+		for visualSlot, record in pairs(self.VisualRecordBySlot) do
+			if record.InstanceId == instanceId then
+				return visualSlot
+			end
 		end
+		return 0
+	end
 
-		local uiPosition = _UILogic:ScreenToUIPosition(screenPoint)
-		self.DragGhost.UITransformComponent.anchoredPosition = uiPosition
+	@ExecSpace("ClientOnly")
+	method void MoveDragGhost(Vector2 screenPoint)
+		if isvalid(self.DragGhost) then
+			self.DragGhost.UITransformComponent.anchoredPosition = _UILogic:ScreenToUIPosition(screenPoint)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void UpdateSnapTarget(Vector2 screenPoint)
-		-- 가장 가까운 빈 슬롯을 찾되 두 슬롯 사이가 애매하면 스냅하지 않는다.
 		self:ClearSnapTarget()
-
 		local localPlayer = _UserService.LocalPlayer
 		if not isvalid(localPlayer) or not isvalid(localPlayer.CurrentMap) then
 			return
 		end
-
 		local worldPoint = _UILogic:ScreenToWorldPosition(screenPoint)
 		local nearestSlot = nil
 		local nearestDistance = 999999
 		local secondDistance = 999999
-
 		for index = 1, 15 do
-			local slotEntity = localPlayer.CurrentMap:GetChildByName(
-				"PlayerSlot_" .. tostring(index)
-			)
+			local slotEntity = localPlayer.CurrentMap:GetChildByName("PlayerSlot_" .. tostring(index))
 			if isvalid(slotEntity) then
-				---@type ThreeLaneSlot
-				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
-				if isvalid(slot) then
-					local slotPosition = slotEntity.TransformComponent.WorldPosition
-					local deltaX = worldPoint.x - slotPosition.x
-					local deltaY = worldPoint.y - slotPosition.y
-					local distance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
-
-					if distance < nearestDistance then
-						secondDistance = nearestDistance
-						nearestDistance = distance
-						nearestSlot = slotEntity
-					elseif distance < secondDistance then
-						secondDistance = distance
-					end
+				local slotPosition = slotEntity.TransformComponent.WorldPosition
+				local deltaX = worldPoint.x - slotPosition.x
+				local deltaY = worldPoint.y - slotPosition.y
+				local distance = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+				if distance < nearestDistance then
+					secondDistance = nearestDistance
+					nearestDistance = distance
+					nearestSlot = slotEntity
+				elseif distance < secondDistance then
+					secondDistance = distance
 				end
 			end
 		end
-
 		if not isvalid(nearestSlot) or nearestDistance > self.SnapRadius then
 			return
 		end
-
 		---@type ThreeLaneSlot
-		local nearestSlotComponent = nearestSlot:GetComponent("script.ThreeLaneSlot")
-		if not isvalid(nearestSlotComponent) then
-			return
-		end
-
-		if secondDistance <= self.SnapRadius
-			and secondDistance - nearestDistance < self.AmbiguityMargin then
-			self:SetCardHint("두 슬롯 사이입니다. 원하는 슬롯 중앙에 더 가깝게 놓아 주세요.")
-			return
-		end
-
-		if nearestSlotComponent.IsOccupied then
+		local slot = nearestSlot:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(slot) or slot.IsOccupied then
 			self:SetCardHint("가장 가까운 슬롯은 이미 사용 중입니다.")
 			return
 		end
-
+		if secondDistance <= self.SnapRadius and secondDistance - nearestDistance < self.AmbiguityMargin then
+			self:SetCardHint("두 슬롯 사이입니다. 원하는 슬롯 중앙에 더 가깝게 놓아 주세요.")
+			return
+		end
 		self.SnapSlotEntity = nearestSlot
 		if isvalid(nearestSlot.SpriteRendererComponent) then
 			nearestSlot.SpriteRendererComponent.Color = Color(1.0, 0.78, 0.18, 1.0)
 		end
-
-		self:SetCardHint(
-			"스냅 대상: 슬롯 "
-				.. tostring(nearestSlotComponent.SlotIndex)
-				.. " · 놓으면 배치"
-		)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void ClearSnapTarget()
-		-- 이전 스냅 후보의 미리보기 색을 원래 파란색으로 되돌린다.
-		if isvalid(self.SnapSlotEntity)
-			and isvalid(self.SnapSlotEntity.SpriteRendererComponent) then
-			self.SnapSlotEntity.SpriteRendererComponent.Color =
-				Color(0.25, 0.65, 1.0, 0.85)
+		if isvalid(self.SnapSlotEntity) and isvalid(self.SnapSlotEntity.SpriteRendererComponent) then
+			---@type ThreeLaneSlot
+			local slot = self.SnapSlotEntity:GetComponent("script.ThreeLaneSlot")
+			if isvalid(slot) and slot.OccupancyState == "Permanent" then
+				self.SnapSlotEntity.SpriteRendererComponent.Color = Color(0.30, 0.38, 0.55, 0.75)
+			elseif isvalid(slot) and slot.IsOccupied then
+				self.SnapSlotEntity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
+			else
+				self.SnapSlotEntity.SpriteRendererComponent.Color = Color(0.25, 0.65, 1.0, 0.85)
+			end
 		end
-
 		self.SnapSlotEntity = nil
 	end
 
 	@ExecSpace("ClientOnly")
-	method boolean IsCardUsed(integer cardIndex)
-		-- 동기화된 7자리 사용 마스크에서 해당 카드의 이번 턴 사용 여부를 읽는다.
-		local mask = self:GetUsedCardMask()
-		if cardIndex < 1 or cardIndex > string.len(mask) then
-			return false
-		end
-
-		return string.sub(mask, cardIndex, cardIndex) == "1"
-	end
-
-	@ExecSpace("ClientOnly")
-	method string GetUsedCardMask()
-		-- 보드가 아직 동기화되지 않은 경우 안전한 기본 마스크를 반환한다.
+	method void SelectReservedSlot(Entity slotEntity)
 		local board = self:GetBoard()
-		if board == nil or board.UsedCardMask == nil then
-			return "0000000"
+		if board == nil or board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
+			return
 		end
-
-		return board.UsedCardMask
+		---@type ThreeLaneSlot
+		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(slot) or slot.OccupancyState ~= "Reserved" then
+			self:SetCardHint("영구 설치 슬롯은 취소하거나 다시 배치할 수 없습니다.")
+			return
+		end
+		if self.SelectedReservedSlot == slot.SlotIndex then
+			self:ClearReservedSelection()
+			return
+		end
+		self:ClearReservedSelection()
+		self.SelectedReservedSlot = slot.SlotIndex
+		self.SelectedCardInstanceId = ""
+		self.SelectedVisualSlot = 0
+		if isvalid(slotEntity.SpriteRendererComponent) then
+			slotEntity.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.20, 1.0)
+		end
+		self:SetCardHint("예약 선택: 슬롯 " .. tostring(slot.SlotIndex) .. " · 취소 버튼으로 정확한 카드 복사본을 회수합니다.")
 	end
 
 	@ExecSpace("ClientOnly")
-	method void RefreshCardVisuals(ThreeLaneBoard board)
-		-- 사용 완료·코스트 부족·선택·기본 상태를 서로 다른 색으로 구분한다.
-		local usedMask = board.UsedCardMask
-		if usedMask == nil or string.len(usedMask) < 7 then
-			usedMask = "0000000"
+	method void ClearReservedSelection()
+		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
+		if isvalid(slotEntity) and isvalid(slotEntity.SpriteRendererComponent) then
+			slotEntity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
+		end
+		self.SelectedReservedSlot = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ValidateReservedSelection(ThreeLaneBoard board)
+		if self.SelectedReservedSlot == 0 then
+			return
+		end
+		if board.Phase ~= "Placement" or board.BattleState ~= "Playing" then
+			self:ClearReservedSelection()
+			return
+		end
+		local slotEntity = self:GetSlotEntity(self.SelectedReservedSlot)
+		if not isvalid(slotEntity) then
+			self.SelectedReservedSlot = 0
+			return
+		end
+		---@type ThreeLaneSlot
+		local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+		if not isvalid(slot) or slot.OccupancyState ~= "Reserved" then
+			self.SelectedReservedSlot = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPermanentSlots()
+		for index = 1, 15 do
+			local slotEntity = self:GetSlotEntity(index)
+			if isvalid(slotEntity) then
+				---@type ThreeLaneSlot
+				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+				if isvalid(slot) then
+					slot.OccupancyState = "Empty"
+				end
+			end
+			local marker = self.PermanentMarkerEntities[index]
+			if isvalid(marker) then
+				marker.Enable = false
+			end
 		end
 
-		local placementOpen = board.BattleState == "Playing" and board.Phase == "Placement"
+		for _, record in ipairs(self.InstalledCards) do
+			local slotIndex = record.PermanentSlotIndex
+			local slotEntity = self:GetSlotEntity(slotIndex)
+			if isvalid(slotEntity) then
+				---@type ThreeLaneSlot
+				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+				if isvalid(slot) then
+					slot.IsOccupied = true
+					slot.OccupancyState = "Permanent"
+				end
+			end
+			local marker = self.PermanentMarkerEntities[slotIndex]
+			if isvalid(marker) and isvalid(slotEntity) then
+				marker.Enable = true
+				local portrait = marker:GetChildByName("Portrait")
+				if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
+					portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
+				end
+				local deadShade = marker:GetChildByName("DeadShade")
+				if isvalid(deadShade) then
+					deadShade.Enable = record.VisualState == "Dead"
+				end
+				local worldPosition = slotEntity.TransformComponent.WorldPosition
+				local screenPosition = _UILogic:WorldToScreenPosition(Vector2(worldPosition.x, worldPosition.y))
+				marker.UITransformComponent.anchoredPosition = _UILogic:ScreenToUIPosition(screenPosition)
+			end
+		end
 
-		for index, cardEntity in ipairs(self.CardEntities) do
-			if isvalid(cardEntity) and isvalid(cardEntity.SpriteGUIRendererComponent) then
-				if string.sub(usedMask, index, index) == "1" then
-					cardEntity.SpriteGUIRendererComponent.Color =
-						Color(0.35, 0.37, 0.42, 0.72)
-				elseif not placementOpen then
-					cardEntity.SpriteGUIRendererComponent.Color =
-						Color(0.45, 0.47, 0.52, 0.72)
-				elseif board.CurrentCost < self.CardCosts[index] then
-					cardEntity.SpriteGUIRendererComponent.Color =
-						Color(0.62, 0.42, 0.42, 0.85)
-				elseif self.SelectedCardIndex == index then
-					cardEntity.SpriteGUIRendererComponent.Color =
-						Color(1.0, 0.80, 0.28, 1.0)
-				else
-					cardEntity.SpriteGUIRendererComponent.Color =
-						Color(0.8667, 0.9490, 1.0, 1.0)
+		for _, record in ipairs(self.HandCards) do
+			if record.State == "Reserved" and record.ReservedSlotIndex > 0 then
+				local slotEntity = self:GetSlotEntity(record.ReservedSlotIndex)
+				if isvalid(slotEntity) then
+					---@type ThreeLaneSlot
+					local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
+					if isvalid(slot) then
+						slot.IsOccupied = true
+						slot.OccupancyState = "Reserved"
+					end
 				end
 			end
 		end
 	end
 
 	@ExecSpace("ClientOnly")
-	method void SetCardHint(string message)
-		-- 조작 결과와 다음 행동을 카드 목록 상단에 즉시 안내한다.
-		if isvalid(self.CardHintText) then
-			self.CardHintText.Text = message
+	method void ShowCardDetails(table record)
+		if record == nil or not isvalid(self.CardDetailPanel) then
+			return
+		end
+		self.DetailInstanceId = record.InstanceId
+		self.CardDetailPanel.Enable = true
+		local portrait = self.CardDetailPanel:GetChildByName("Portrait")
+		if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
+			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
+		end
+		self:SetEntityText(self.CardDetailPanel:GetChildByName("Name"), record.DevName)
+		local rangeLabel = "근접"
+		if record.RangeClass == "Ranged" then
+			rangeLabel = "원거리"
+		end
+		self:SetEntityText(
+			self.CardDetailPanel:GetChildByName("Stats"),
+			"코스트 " .. tostring(record.Cost) .. " · " .. rangeLabel
+			.. "\nHP " .. tostring(record.HP) .. "  공격 " .. tostring(record.Attack)
+			.. "  수호석 " .. tostring(record.NexusDamage)
+		)
+		local effectText = "특수효과 없음"
+		if record.EffectType ~= "None" then
+			effectText = "특수효과 · " .. record.EffectType
+		end
+		self:SetEntityText(self.CardDetailPanel:GetChildByName("Effect"), effectText)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideCardDetails()
+		self.DetailInstanceId = ""
+		if isvalid(self.CardDetailPanel) then
+			self.CardDetailPanel.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartDrawAnimation(table record)
+		if record == nil or not isvalid(self.DrawGhost) then
+			return
+		end
+		self:SetCardEntityData(self.DrawGhost, record)
+		self.DrawGhost.Enable = true
+		self.DrawGhost.UITransformComponent.anchoredPosition = Vector2(620, -350)
+		self.DrawAnimationElapsed = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateDrawAnimation(number delta)
+		if self.DrawAnimationElapsed < 0 or not isvalid(self.DrawGhost) then
+			return
+		end
+		self.DrawAnimationElapsed = self.DrawAnimationElapsed + delta
+		local rate = self.DrawAnimationElapsed / 0.45
+		if rate > 1 then
+			rate = 1
+		end
+		self.DrawGhost.UITransformComponent.anchoredPosition = Vector2(
+			620 + (0 - 620) * rate,
+			-350 + (-425 + 350) * rate
+		)
+		if rate >= 1 then
+			self.DrawGhost.Enable = false
+			self.DrawAnimationElapsed = -1
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowBurnToast(table record)
+		if record == nil or not isvalid(self.BurnToast) then
+			return
+		end
+		self.BurnToast.Enable = true
+		self.BurnToastRemaining = 3.0
+		local portrait = self.BurnToast:GetChildByName("Portrait")
+		if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
+			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
+		end
+		self:SetEntityText(self.BurnToast:GetChildByName("Name"), record.DevName)
+		self:SetEntityText(self.BurnToast:GetChildByName("Message"), "패가 가득 차 카드가 소실되었습니다")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBurnToast(number delta)
+		if self.BurnToastRemaining <= 0 then
+			return
+		end
+		self.BurnToastRemaining = self.BurnToastRemaining - delta
+		if self.BurnToastRemaining <= 0 and isvalid(self.BurnToast) then
+			self.BurnToast.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshConfirmVisual(ThreeLaneBoard board)
+		if not isvalid(self.ConfirmButton) then
+			return
+		end
+		local usable = board.BattleState == "Playing" and board.Phase == "Placement"
+		if isvalid(self.ConfirmButton.ButtonComponent) then
+			self.ConfirmButton.ButtonComponent.Enable = usable
+		end
+		if isvalid(self.ConfirmButton.SpriteGUIRendererComponent) then
+			if usable then self.ConfirmButton.SpriteGUIRendererComponent.Color = Color(0.16, 0.55, 0.32, 1.0)
+			else self.ConfirmButton.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.7) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCancelVisual(ThreeLaneBoard board)
+		if not isvalid(self.CancelButton) then
+			return
+		end
+		local usable = board.BattleState == "Playing" and board.Phase == "Placement" and board.PendingCount > 0
+		if isvalid(self.CancelButton.ButtonComponent) then
+			self.CancelButton.ButtonComponent.Enable = usable
+		end
+		if isvalid(self.CancelButton.TextGUIRendererComponent) then
+			if self.SelectedReservedSlot ~= 0 then self.CancelButton.TextGUIRendererComponent.Text = "슬롯 " .. tostring(self.SelectedReservedSlot) .. " 취소"
+			else self.CancelButton.TextGUIRendererComponent.Text = "되돌리기 (" .. tostring(board.PendingCount) .. ")" end
+		end
+		if isvalid(self.CancelButton.SpriteGUIRendererComponent) then
+			if usable then self.CancelButton.SpriteGUIRendererComponent.Color = Color(0.68, 0.24, 0.24, 1.0)
+			else self.CancelButton.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.7) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSpeedVisual(ThreeLaneBoard board)
+		self:SetSpeedButtonVisual(self.Speed1Button, board.SimSpeed == 1)
+		self:SetSpeedButtonVisual(self.Speed2Button, board.SimSpeed == 2)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetSpeedButtonVisual(Entity button, boolean selected)
+		if not isvalid(button) then
+			return
+		end
+		if isvalid(button.SpriteGUIRendererComponent) then
+			if selected then button.SpriteGUIRendererComponent.Color = Color(1.0, 0.80, 0.28, 1.0)
+			else button.SpriteGUIRendererComponent.Color = Color(0.28, 0.30, 0.34, 0.88) end
+		end
+		if isvalid(button.TextGUIRendererComponent) then
+			if selected then button.TextGUIRendererComponent.FontColor = Color(0.10, 0.14, 0.19, 1.0)
+			else button.TextGUIRendererComponent.FontColor = Color(1.0, 1.0, 1.0, 1.0) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCancelClicked(ButtonClickEvent event)
+		local board = self:GetBoard()
+		if board == nil or board.Phase ~= "Placement" or board.PendingCount <= 0 then
+			return
+		end
+		if self.SelectedReservedSlot ~= 0 then
+			local slotIndex = self.SelectedReservedSlot
+			self:ClearReservedSelection()
+			board:RequestCancelPlacement(slotIndex)
+		else
+			board:RequestUndoPlacement()
 		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnConfirmClicked(ButtonClickEvent event)
-		-- 배치 확정 버튼을 보드의 서버 RPC로 연결한다.
 		local board = self:GetBoard()
-		if board == nil then
-			log_error("[ThreeLaneHUD] Confirm failed - board not found")
+		if board == nil or board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
+			self:SetCardHint("첫 패 선택이 끝난 배치 단계에서만 확정할 수 있습니다.")
 			return
 		end
-
-		if board.BattleState ~= "Playing" then
-			self:SetCardHint("전투가 끝났습니다. 재시작을 눌러 주세요.")
-			return
-		end
-
-		if board.Phase ~= "Placement" then
-			self:SetCardHint("지금은 배치 단계가 아닙니다.")
-			return
-		end
-
-		self.SelectedCardIndex = 0
+		self.SelectedCardInstanceId = ""
+		self.SelectedVisualSlot = 0
 		self:ClearReservedSelection()
 		self:ClearSnapTarget()
 		board:RequestConfirmPlacement()
-		self:SetCardHint("배치를 확정했습니다. 전투를 시작합니다.")
-		log("[ThreeLaneHUD] Confirm clicked - Turn=" .. tostring(board.TurnNumber))
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnRestartClicked(ButtonClickEvent event)
-		-- UI 재시작 버튼을 보드의 서버 RPC로 연결한다.
 		local board = self:GetBoard()
 		if board == nil then
-			log_error("[ThreeLaneHUD] Restart failed - board not found")
 			return
 		end
-
-		self.SelectedCardIndex = 0
+		self.SelectedCardInstanceId = ""
+		self.SelectedVisualSlot = 0
+		self.MulliganSelectedIds = {}
+		self.MulliganConfirmedLocally = false
 		self:ClearReservedSelection()
 		self:ClearSnapTarget()
 		board:RequestRestart()
-		self:SetCardHint("전투를 처음부터 다시 시작했습니다.")
-		log("[ThreeLaneHUD] Restart clicked")
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnSpeed1Clicked(ButtonClickEvent event)
-		-- ×1 버튼을 서버 권위 배속 요청으로 연결한다.
 		local board = self:GetBoard()
-		if board == nil then
-			return
+		if board ~= nil then
+			board:RequestSetSimulationSpeed(1)
 		end
-		board:RequestSetSimulationSpeed(1)
-		self:SetCardHint("전투 배속을 ×1로 변경했습니다.")
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnSpeed2Clicked(ButtonClickEvent event)
-		-- ×2 버튼을 서버 권위 배속 요청으로 연결한다.
 		local board = self:GetBoard()
-		if board == nil then
-			return
+		if board ~= nil then
+			board:RequestSetSimulationSpeed(2)
 		end
-		board:RequestSetSimulationSpeed(2)
-		self:SetCardHint("전투 배속을 ×2로 변경했습니다.")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetCardHint(string message)
+		if isvalid(self.CardHintText) then
+			self.CardHintText.Text = message
+		end
 	end
 
 end

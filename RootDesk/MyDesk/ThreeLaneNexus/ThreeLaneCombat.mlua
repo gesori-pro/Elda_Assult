@@ -668,6 +668,7 @@ script ThreeLaneCombat extends Component
 			if unit.Alive == true and unit.HP <= 0 then
 				unit.Alive = false
 				unit.DeathTick = self.SimTick
+				self:NotifyPermanentUnitResolved(unit)
 				self:SetUnitVisualVelocity(unit, 0)
 				log(
 					"[ThreeLaneCombat][Death] CombatUnitId="
@@ -679,6 +680,7 @@ script ThreeLaneCombat extends Component
 			elseif unit.PendingExit == true then
 				unit.PendingExit = false
 				unit.Exited = true
+				self:NotifyPermanentUnitResolved(unit)
 				self:SetUnitVisualVelocity(unit, 0)
 				log(
 					"[ThreeLaneCombat][Exit] CombatUnitId="
@@ -688,6 +690,19 @@ script ThreeLaneCombat extends Component
 				)
 				self:DestroyVisualEntity(unit)
 			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void NotifyPermanentUnitResolved(any unit)
+		-- 실제 영구 카드 인스턴스만 Board에 퇴장 상태를 통지한다. 테스트 유닛은 CardInstanceId가 없어 제외된다.
+		if unit == nil or unit.CardInstanceId == nil or unit.CardInstanceId == "" then
+			return
+		end
+
+		local board = self:GetBoard()
+		if isvalid(board) then
+			board:MarkPermanentUnitResolved(unit.OwnerSide, unit.CardInstanceId)
 		end
 	end
 
@@ -722,6 +737,7 @@ script ThreeLaneCombat extends Component
 			unit.Alive = false
 			unit.HP = 0
 			unit.DeathTick = self.SimTick
+			self:NotifyPermanentUnitResolved(unit)
 			self:SetUnitVisualVelocity(unit, 0)
 			log(
 				"[ThreeLaneCombat][TimeoutDeath] CombatUnitId="
@@ -1289,10 +1305,10 @@ script ThreeLaneCombat extends Component
 		end
 
 		local board = self:GetBoard()
+		self.MakerHarnessRunning = false
 		if isvalid(board) then
 			board:ResetBattle()
 		end
-		self.MakerHarnessRunning = false
 
 		if allPassed then
 			log("[ThreeLaneCombat][TEST][ALL] PASS - normal play state restored")
@@ -1308,10 +1324,10 @@ script ThreeLaneCombat extends Component
 		self.MakerHarnessRunning = true
 		local passed = self:RunMakerTestScenarioInternal(scenarioName)
 		local board = self:GetBoard()
+		self.MakerHarnessRunning = false
 		if isvalid(board) then
 			board:ResetBattle()
 		end
-		self.MakerHarnessRunning = false
 		return passed
 	end
 

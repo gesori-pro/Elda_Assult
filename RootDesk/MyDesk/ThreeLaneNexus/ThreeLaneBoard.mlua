@@ -11,7 +11,7 @@ script ThreeLaneBoard extends Component
 	property string BattleState = "Playing"
 
 	@Sync
-	property string Phase = "Placement"
+	property string Phase = "Mulligan"
 
 	@Sync
 	property integer TurnNumber = 1
@@ -62,6 +62,18 @@ script ThreeLaneBoard extends Component
 	property integer EnemyBurnedCount = 0
 
 	@Sync
+	property boolean PlayerMulliganReady = false
+
+	@Sync
+	property boolean EnemyMulliganReady = false
+
+	@Sync
+	property string PlayerDeadSlotMask = "000000000000000"
+
+	@Sync
+	property string EnemyDeadSlotMask = "000000000000000"
+
+	@Sync
 	property number SimSpeed = 1
 
 	property string UnitModelId = "threelaneprototypeunit"
@@ -106,7 +118,9 @@ script ThreeLaneBoard extends Component
 
 	property integer FixedEnemySeed = 24080402
 
-	property boolean AutoConfirmRerollWithoutUI = true
+	property boolean AutoConfirmRerollWithoutUI = false
+
+	property string PlayerOwnerUserId = ""
 
 	property integer EnemyFixedCardIndex = 5
 
@@ -312,11 +326,18 @@ script ThreeLaneBoard extends Component
 			return false
 		end
 		state.LastDrawTurn = turnNumber
-		self:DrawOneCard(ownerSide)
+		local drawn = self:DrawOneCard(ownerSide)
 		self:SyncPublicCardCounts()
 		if ownerSide == 1 then
 			self:RefreshUsedCardMask()
 			self:RefreshPlayerSlotOccupancy()
+			if drawn == nil then
+				self:SendPrivateCardState("DeckEmpty", nil)
+			elseif drawn.State == "Burned" then
+				self:SendPrivateCardState("Burn", drawn)
+			else
+				self:SendPrivateCardState("Draw", drawn)
+			end
 		end
 		return true
 	end
@@ -376,7 +397,7 @@ script ThreeLaneBoard extends Component
 
 	@ExecSpace("ServerOnly")
 	method boolean InitializeMatchCardStates(integer playerSeed, integer enemySeed)
-		-- 양측을 같은 기본 덱 규칙으로 초기화하고 4장·무선택 리롤·첫 턴 1장까지 처리한다.
+		-- 양측을 같은 기본 덱 규칙으로 초기화하고 실제 플레이는 Mulligan 4장에서 대기한다.
 		self.PlayerCardState = self:BuildDefaultDeckState(1, playerSeed)
 		self.EnemyCardState = self:BuildDefaultDeckState(2, enemySeed)
 		if self.PlayerCardState == nil or self.EnemyCardState == nil then
@@ -386,13 +407,26 @@ script ThreeLaneBoard extends Component
 			self:DrawOneCard(1)
 			self:DrawOneCard(2)
 		end
-		if self.AutoConfirmRerollWithoutUI then
+		self.Phase = "Mulligan"
+		self.PlayerMulliganReady = false
+		self.EnemyMulliganReady = false
+		local combat = self:GetCombat()
+		local autoConfirm = self.AutoConfirmRerollWithoutUI
+			or (isvalid(combat) and combat.MakerHarnessRunning)
+		if autoConfirm then
 			self:ConfirmInitialReroll(1, {})
 			self:ConfirmInitialReroll(2, {})
+			self.PlayerMulliganReady = true
+			self.EnemyMulliganReady = true
+		else
+			-- M1 AI는 자기 패에서 0장 유지로 비공개 리롤을 한 번 정상 소모한다.
+			self:ConfirmInitialReroll(2, {})
+			self.EnemyMulliganReady = true
 		end
-		self:DrawForTurn(1, 1)
-		self:DrawForTurn(2, 1)
 		self:SyncPublicCardCounts()
+		if autoConfirm then
+			self:TryFinishInitialMulligan()
+		end
 		log(
 			"[Phase2C4A][Deck] Ready PlayerSeed="
 			.. tostring(playerSeed)
@@ -406,6 +440,8 @@ script ThreeLaneBoard extends Component
 			.. tostring(self.EnemyDeckCount)
 			.. "/Hand"
 			.. tostring(self.EnemyHandCount)
+			.. ", Phase="
+			.. self.Phase
 		)
 		return true
 	end
@@ -416,7 +452,8 @@ script ThreeLaneBoard extends Component
 		local player = self.PlayerCardState
 		local enemy = self.EnemyCardState
 		if player ~= nil and player.Deck ~= nil then
-			self.PlayerHandCount = #player.Hand
+			-- 예약 인스턴스도 확정 전에는 손패 HUD에 남으므로 공개 패 장수에 포함한다.
+			self.PlayerHandCount = #player.Hand + #self.PendingPlacements
 			self.PlayerDeckCount = #player.Deck
 			self.PlayerInstalledCount = #player.Installed
 			self.PlayerBurnedCount = #player.Burned
@@ -427,7 +464,7 @@ script ThreeLaneBoard extends Component
 			self.PlayerBurnedCount = 0
 		end
 		if enemy ~= nil and enemy.Deck ~= nil then
-			self.EnemyHandCount = #enemy.Hand
+			self.EnemyHandCount = #enemy.Hand + #self.EnemyPendingPlacements
 			self.EnemyDeckCount = #enemy.Deck
 			self.EnemyInstalledCount = #enemy.Installed
 			self.EnemyBurnedCount = #enemy.Burned
@@ -454,10 +491,235 @@ script ThreeLaneBoard extends Component
 		return ""
 	end
 
+	@ExecSpace("ServerOnly")
+	method string BuildCardDisplayRecord(any instance)
+		-- 소유자 전용 HUD에 필요한 표시 필드만 직렬화한다. 덱 순서와 상대 손패는 포함하지 않는다.
+		if instance == nil then
+			return ""
+		end
+		local monster = self:GetMonsterById(instance.MonsterId)
+		local data = self:GetData()
+		if monster == nil or not isvalid(data) then
+			return ""
+		end
+		return instance.InstanceId
+			.. "|" .. monster.MonsterId
+			.. "|" .. tostring(monster.CardIndex)
+			.. "|" .. tostring(monster.Cost)
+			.. "|" .. monster.DevName
+			.. "|" .. monster.RangeClass
+			.. "|" .. monster.EffectType
+			.. "|" .. instance.State
+			.. "|" .. data:GetCardImageRuid(monster.MonsterId)
+			.. "|" .. tostring(monster.HP)
+			.. "|" .. tostring(monster.Attack)
+			.. "|" .. tostring(monster.AttackInterval)
+			.. "|" .. tostring(monster.MoveSpeed)
+			.. "|" .. tostring(monster.NexusDamage)
+			.. "|" .. monster.NameKey
+			.. "|" .. monster.EffectTextKey
+	end
+
+	@ExecSpace("ServerOnly")
+	method string BuildPrivateCardPayload()
+		-- 플레이어의 손패·예약·영구 설치만 대상 지정 RPC용 문자열로 만든다.
+		local state = self.PlayerCardState
+		if state == nil or state.InstanceById == nil then
+			return "#"
+		end
+		local handInstances = {}
+		for _, instanceId in ipairs(state.Hand) do
+			local instance = state.InstanceById[instanceId]
+			if instance ~= nil and instance.State == "Hand" then
+				table.insert(handInstances, instance)
+			end
+		end
+		for _, command in ipairs(self.PendingPlacements) do
+			local instance = state.InstanceById[command.CardInstanceId]
+			if instance ~= nil and instance.State == "Reserved" then
+				table.insert(handInstances, instance)
+			end
+		end
+		table.sort(
+			handInstances,
+			function(a, b)
+				if a.Cost ~= b.Cost then
+					return a.Cost < b.Cost
+				end
+				if a.MonsterId ~= b.MonsterId then
+					return a.MonsterId < b.MonsterId
+				end
+				return a.InstanceId < b.InstanceId
+			end
+		)
+		local handRecords = {}
+		for _, instance in ipairs(handInstances) do
+			local reservedSlotIndex = 0
+			if instance.State == "Reserved" then
+				for _, command in ipairs(self.PendingPlacements) do
+					if command.CardInstanceId == instance.InstanceId then
+						reservedSlotIndex = command.SlotIndex
+						break
+					end
+				end
+			end
+			table.insert(
+				handRecords,
+				self:BuildCardDisplayRecord(instance) .. "|" .. tostring(reservedSlotIndex)
+			)
+		end
+
+		local installedInstances = {}
+		for _, instanceId in ipairs(state.Installed) do
+			local instance = state.InstanceById[instanceId]
+			if instance ~= nil and instance.State == "Installed" then
+				table.insert(installedInstances, instance)
+			end
+		end
+		table.sort(
+			installedInstances,
+			function(a, b)
+				return a.PlacementOrder < b.PlacementOrder
+			end
+		)
+		local installedRecords = {}
+		for _, instance in ipairs(installedInstances) do
+			local visualState = "Dead"
+			if self.Phase == "Reveal" then
+				visualState = "Alive"
+			elseif self.Phase == "Battle"
+				and string.sub(self.PlayerDeadSlotMask, instance.PermanentSlotIndex, instance.PermanentSlotIndex) ~= "1" then
+				visualState = "Alive"
+			end
+			table.insert(
+				installedRecords,
+				self:BuildCardDisplayRecord(instance)
+					.. "|" .. tostring(instance.PermanentSlotIndex)
+					.. "|" .. visualState
+					.. "|" .. tostring(instance.PlacementOrder)
+			)
+		end
+		return table.concat(handRecords, ";") .. "#" .. table.concat(installedRecords, ";")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table ParseInstanceIdList(string value)
+		local result = {}
+		if value == nil or value == "" then
+			return result
+		end
+		for instanceId in string.gmatch(value, "[^,]+") do
+			table.insert(result, instanceId)
+		end
+		return result
+	end
+
+	@ExecSpace("Server")
+	method void RequestPrivateCardSnapshot()
+		-- 첫 로컬 플레이어를 M1 PvE 카드 상태의 소유자로 고정하고 자기 정보만 돌려준다.
+		if self.PlayerOwnerUserId ~= "" and self.PlayerOwnerUserId ~= senderUserId then
+			log_warning("[Phase2C4B][Private] snapshot rejected - owner mismatch")
+			return
+		end
+		self.PlayerOwnerUserId = senderUserId
+		self:SendPrivateCardState("Snapshot", nil)
+	end
+
+	@ExecSpace("Server")
+	method void RequestConfirmMulligan(string selectedInstanceIds)
+		-- Mulligan에서만 한 번 허용하며 클라이언트가 제출한 인스턴스를 서버 손패로 다시 검증한다.
+		if self.PlayerOwnerUserId ~= "" and self.PlayerOwnerUserId ~= senderUserId then
+			log_warning("[Phase2C4B][Mulligan] rejected - owner mismatch")
+			return
+		end
+		self.PlayerOwnerUserId = senderUserId
+		if self.Phase ~= "Mulligan" or self.PlayerMulliganReady then
+			log("[Phase2C4B][Mulligan] rejected - Phase=" .. self.Phase .. ", Ready=" .. tostring(self.PlayerMulliganReady))
+			self:SendPrivateCardState("MulliganRejected", nil)
+			return
+		end
+		local selected = self:ParseInstanceIdList(selectedInstanceIds)
+		if not self:ConfirmInitialReroll(1, selected) then
+			log("[Phase2C4B][Mulligan] rejected - invalid selection")
+			self:SendPrivateCardState("MulliganRejected", nil)
+			return
+		end
+		self.PlayerMulliganReady = true
+		self:SendPrivateCardState("MulliganResult", nil)
+		self:TryFinishInitialMulligan()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SendPrivateCardState(string eventType, any eventInstance)
+		if self.PlayerOwnerUserId == "" then
+			return
+		end
+		local eventRecord = self:BuildCardDisplayRecord(eventInstance)
+		self:ClientReceivePrivateCardState(
+			self:BuildPrivateCardPayload(),
+			eventType,
+			eventRecord,
+			self.PlayerOwnerUserId
+		)
+	end
+
+	@ExecSpace("Client")
+	method void ClientReceivePrivateCardState(string payload, string eventType, string eventRecord)
+		-- 대상 사용자 클라이언트에서만 HUD에 자기 카드 상태를 전달한다.
+		local controller = _EntityService:GetEntityByPath("/ui/ThreeLaneHUD/Controller")
+		if not isvalid(controller) then
+			return
+		end
+		---@type ThreeLaneHUD
+		local hud = controller:GetComponent("script.ThreeLaneHUD")
+		if isvalid(hud) then
+			hud:ReceivePrivateCardState(payload, eventType, eventRecord)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TryFinishInitialMulligan()
+		-- 양측이 비공개 리롤을 끝낸 뒤에만 첫 턴 드로우와 Placement를 연다.
+		if self.Phase ~= "Mulligan" or not self.PlayerMulliganReady or not self.EnemyMulliganReady then
+			return
+		end
+		self:DrawForTurn(1, 1)
+		self:DrawForTurn(2, 1)
+		self.Phase = "Placement"
+		self.PhaseElapsed = 0
+		self:PrepareEnemyPlacementForTurn()
+		self:RefreshPlayerSlotOccupancy()
+		self:RefreshUsedCardMask()
+		self:SyncPublicCardCounts()
+		self:SendPrivateCardState("MulliganComplete", nil)
+		log(
+			"[Phase2C4B][Mulligan] Complete - PlayerHand="
+			.. tostring(self.PlayerHandCount)
+			.. ", EnemyHand="
+			.. tostring(self.EnemyHandCount)
+			.. ", Phase=Placement"
+		)
+	end
+
 	@ExecSpace("Server")
 	method void RequestPlaceCard(integer slotIndex, Vector3 spawnPosition, integer cardIndex)
 		-- 클라이언트 배치 요청을 서버 검증 경로로 연결한다.
+		if self.PlayerOwnerUserId ~= "" and senderUserId ~= self.PlayerOwnerUserId then
+			log_warning("[Phase2C4B] Placement rejected - non-owner request")
+			return
+		end
 		self:TryPlaceCardForOwner(slotIndex, spawnPosition, cardIndex, senderUserId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestPlaceCardInstance(integer slotIndex, string cardInstanceId)
+		-- Phase 2C-4B 실제 HUD는 정확한 카드 복사본 ID를 제출한다.
+		if self.PlayerOwnerUserId ~= "" and self.PlayerOwnerUserId ~= senderUserId then
+			log_warning("[Phase2C4B][Placement] rejected - owner mismatch")
+			return
+		end
+		self.PlayerOwnerUserId = senderUserId
+		self:TryReserveCardInstance(1, slotIndex, cardInstanceId, senderUserId)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -602,6 +864,7 @@ script ThreeLaneBoard extends Component
 		if ownerSide == 1 then
 			self:RefreshUsedCardMask()
 			self:RefreshPlayerSlotOccupancy()
+			self:SendPrivateCardState("Reserve", instance)
 		end
 
 		log(
@@ -624,6 +887,10 @@ script ThreeLaneBoard extends Component
 	@ExecSpace("Server")
 	method void RequestUndoPlacement()
 		-- 이번 턴에 가장 마지막으로 예약한 배치를 되돌린다(undo). 예약이 없어질 때까지 반복 가능.
+		if self.PlayerOwnerUserId ~= "" and senderUserId ~= self.PlayerOwnerUserId then
+			log_warning("[Phase2C4B] Undo rejected - non-owner request")
+			return
+		end
 		if not self:CanCancelNow("Undo") then
 			return
 		end
@@ -728,6 +995,7 @@ script ThreeLaneBoard extends Component
 		self:RefreshUsedCardMask()
 
 		self:ReleaseSlot(slotIndex)
+		self:SendPrivateCardState("Undo", instance)
 
 		log(
 			"[ThreeLaneBoard] "
@@ -791,6 +1059,10 @@ script ThreeLaneBoard extends Component
 	@ExecSpace("Server")
 	method void RequestConfirmPlacement()
 		-- 배치 확정 입력을 받아 공개 단계로 넘어간다. 배치 0건도 허용한다.
+		if self.PlayerOwnerUserId ~= "" and senderUserId ~= self.PlayerOwnerUserId then
+			log_warning("[Phase2C4B] Confirm rejected - non-owner request")
+			return
+		end
 		if self.BattleState ~= "Playing" then
 			return
 		end
@@ -815,6 +1087,7 @@ script ThreeLaneBoard extends Component
 		end
 		self:CommitPendingPlacements(1)
 		self:CommitPendingPlacements(2)
+		self:ResetDeadSlotMasks()
 		combat:PrepareReveal()
 		log(
 			"[ThreeLaneBoard] Phase=Reveal - Turn="
@@ -837,6 +1110,7 @@ script ThreeLaneBoard extends Component
 		self:SyncPublicCardCounts()
 		self:RefreshUsedCardMask()
 		self:RefreshPlayerSlotOccupancy()
+		self:SendPrivateCardState("Install", nil)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1567,6 +1841,66 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method string SetSlotMaskValue(string mask, integer slotIndex, string value)
+		if slotIndex < 1 or slotIndex > 15 then
+			return mask
+		end
+		local prefix = ""
+		local suffix = ""
+		if slotIndex > 1 then
+			prefix = string.sub(mask, 1, slotIndex - 1)
+		end
+		if slotIndex < 15 then
+			suffix = string.sub(mask, slotIndex + 1, 15)
+		end
+		return prefix .. value .. suffix
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetDeadSlotMasks()
+		self.PlayerDeadSlotMask = "000000000000000"
+		self.EnemyDeadSlotMask = "000000000000000"
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkPermanentUnitResolved(integer ownerSide, string cardInstanceId)
+		-- 전투 개체가 사망·퇴장하면 영구 카드는 유지하고 슬롯만 다음 턴 재출전 상태로 표시한다.
+		if cardInstanceId == nil or cardInstanceId == "" then
+			return
+		end
+		local state = self:GetCardState(ownerSide)
+		if state == nil or state.InstanceById == nil then
+			return
+		end
+		local instance = state.InstanceById[cardInstanceId]
+		if instance == nil or instance.State ~= "Installed" then
+			return
+		end
+		if ownerSide == 2 then
+			self.EnemyDeadSlotMask = self:SetSlotMaskValue(
+				self.EnemyDeadSlotMask,
+				instance.PermanentSlotIndex,
+				"1"
+			)
+		else
+			self.PlayerDeadSlotMask = self:SetSlotMaskValue(
+				self.PlayerDeadSlotMask,
+				instance.PermanentSlotIndex,
+				"1"
+			)
+			self:SendPrivateCardState("PermanentResolved", instance)
+		end
+		log(
+			"[Phase2C4B][PermanentSlot] Resolved Side="
+			.. tostring(ownerSide)
+			.. ", Instance="
+			.. cardInstanceId
+			.. ", Slot="
+			.. tostring(instance.PermanentSlotIndex)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
 	method void ResetBattle()
 		-- 전투·턴·코스트와 양측 15장 서버 카드 상태를 초기값으로 되돌린다.
 		self:KillActiveUnits()
@@ -1582,7 +1916,7 @@ script ThreeLaneBoard extends Component
 		self.PlayerNexusHp = 30
 		self.EnemyNexusHp = 30
 		self.BattleState = "Playing"
-		self.Phase = "Placement"
+		self.Phase = "Mulligan"
 		self.PhaseElapsed = 0
 		self.TurnNumber = 1
 		self.BattleRemaining = self.BattleTimeLimit
@@ -1590,6 +1924,9 @@ script ThreeLaneBoard extends Component
 		self.EnemyCurrentCost = self.StartCost
 		self.MaxCost = 10
 		self.SimSpeed = 1
+		self.PlayerMulliganReady = false
+		self.EnemyMulliganReady = false
+		self:ResetDeadSlotMasks()
 		local playerSeed = self.FixedPlayerSeed
 		local enemySeed = self.FixedEnemySeed
 		if not self.UseFixedMatchSeed then
@@ -1601,16 +1938,20 @@ script ThreeLaneBoard extends Component
 		end
 
 		self:ClearSlots()
-		self:PrepareEnemyPlacementForTurn()
+		if self.Phase == "Placement" then
+			self:PrepareEnemyPlacementForTurn()
+		end
 		self:RefreshPlayerSlotOccupancy()
 		self:RefreshUsedCardMask()
+		self:SendPrivateCardState("Reset", nil)
 
 		log(
 			"[ThreeLaneBoard] Battle reset - PlayerHP=30, EnemyHP=30, Turn=1, Cost="
 			.. tostring(self.CurrentCost)
 			.. "/"
 			.. tostring(self.MaxCost)
-			.. ", Phase=Placement"
+			.. ", Phase="
+			.. self.Phase
 			.. ", EnemyCost="
 			.. tostring(self.EnemyCurrentCost)
 			.. ", PlayerHand="
@@ -2093,7 +2434,7 @@ script ThreeLaneBoard extends Component
 		local enemyConstrained = self.PlayerHandCount == 5
 			and self:GetDeckMonsterSignature(self.PlayerCardState) == playerSignatureBeforeAi
 			and self.EnemyPendingCount >= 0
-			and self.EnemyHandCount + self.EnemyPendingCount == 5
+			and self.EnemyHandCount == 5
 			and self.PlayerDeckCount == #self.PlayerCardState.Deck
 			and self.EnemyDeckCount == #self.EnemyCardState.Deck
 		allPassed = self:RecordPhase2C4ARegression(
@@ -2108,9 +2449,9 @@ script ThreeLaneBoard extends Component
 		) and allPassed
 
 		self.UseFixedMatchSeed = false
-		self.AutoConfirmRerollWithoutUI = true
-		self:ResetBattle()
+		self.AutoConfirmRerollWithoutUI = false
 		combat.MakerHarnessRunning = false
+		self:ResetBattle()
 		if allPassed then
 			log("[Phase2C4A][TEST][ALL] PASS - normal play state restored")
 		else
@@ -2920,6 +3261,132 @@ script ThreeLaneBoard extends Component
 		end
 
 		self.UsedCardMask = mask
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean Phase2C4BHandContains(table state, string instanceId)
+		if state == nil or state.Hand == nil then
+			return false
+		end
+		for _, currentId in ipairs(state.Hand) do
+			if currentId == instanceId then
+				return true
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C4BMulliganCountScenario(integer selectedCount, integer seed)
+		-- 0~4장 선택을 각각 새 고정 Seed 상태에서 실행해 미선택 유지·즉시 재등장 금지·첫 패 5장을 검증한다.
+		self.AutoConfirmRerollWithoutUI = false
+		if not self:InitializeMatchCardStates(seed, seed + 5000) then
+			return false
+		end
+		if self.Phase ~= "Mulligan" or #self.PlayerCardState.Hand ~= 4 then
+			return false
+		end
+
+		local initialIds = {}
+		local selectedIds = {}
+		for index, instanceId in ipairs(self.PlayerCardState.Hand) do
+			initialIds[index] = instanceId
+			if index <= selectedCount then
+				table.insert(selectedIds, instanceId)
+			end
+		end
+		if not self:ConfirmInitialReroll(1, selectedIds) then
+			return false
+		end
+		if self:ConfirmInitialReroll(1, {}) then
+			return false
+		end
+		if #self.PlayerCardState.Hand ~= 4 then
+			return false
+		end
+		for index = 1, selectedCount do
+			if self:Phase2C4BHandContains(self.PlayerCardState, initialIds[index]) then
+				return false
+			end
+		end
+		for index = selectedCount + 1, 4 do
+			if not self:Phase2C4BHandContains(self.PlayerCardState, initialIds[index]) then
+				return false
+			end
+		end
+
+		self.PlayerMulliganReady = true
+		self.EnemyMulliganReady = true
+		self:TryFinishInitialMulligan()
+		return self.Phase == "Placement"
+			and #self.PlayerCardState.Hand == 5
+			and self.PlayerHandCount == 5
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2C4BTests()
+		-- Maker 전용 진입점. 실제 UI 클릭과 배치는 별도 Play 검증으로 남기고 서버 불변식만 결정론적으로 확인한다.
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[Phase2C4B][TEST] Combat unavailable")
+			return false
+		end
+
+		local savedOwnerUserId = self.PlayerOwnerUserId
+		local savedMakerHarnessRunning = combat.MakerHarnessRunning
+		self.PlayerOwnerUserId = ""
+		-- 4B는 Mulligan 대기 자체를 검증하므로 구형 회귀용 자동 리롤 우회는 끈다.
+		combat.MakerHarnessRunning = false
+		self.UseFixedMatchSeed = true
+		local allPassed = true
+
+		self.AutoConfirmRerollWithoutUI = false
+		self:InitializeMatchCardStates(4401, 9401)
+		local firstId = self.PlayerCardState.Hand[1]
+		local placementBlocked = self.Phase == "Mulligan"
+			and self.PlayerMulliganReady == false
+			and self.EnemyMulliganReady == true
+			and self:TryReserveCardInstance(1, 1, firstId, "Maker4B") == false
+		if placementBlocked then
+			log("[Phase2C4B][TEST][PlacementBeforeMulligan] PASS")
+		else
+			log_error("[Phase2C4B][TEST][PlacementBeforeMulligan] FAIL")
+			allPassed = false
+		end
+
+		for selectedCount = 0, 4 do
+			local passed = self:RunPhase2C4BMulliganCountScenario(selectedCount, 4500 + selectedCount)
+			if passed then
+				log("[Phase2C4B][TEST][Mulligan" .. tostring(selectedCount) .. "] PASS")
+			else
+				log_error("[Phase2C4B][TEST][Mulligan" .. tostring(selectedCount) .. "] FAIL")
+				allPassed = false
+			end
+		end
+
+		local orange = self:GetMonsterByCardIndex(8)
+		local orangePassed = orange ~= nil
+			and orange.MonsterId == "orange_mushroom"
+			and orange.Cost == 1
+			and self:GetData():GetCardImageRuid("orange_mushroom") ~= ""
+		if orangePassed then
+			log("[Phase2C4B][TEST][OrangeCard8] PASS")
+		else
+			log_error("[Phase2C4B][TEST][OrangeCard8] FAIL")
+			allPassed = false
+		end
+
+		self.UseFixedMatchSeed = false
+		self.AutoConfirmRerollWithoutUI = false
+		combat.MakerHarnessRunning = savedMakerHarnessRunning
+		self.PlayerOwnerUserId = savedOwnerUserId
+		self:ResetBattle()
+		if allPassed then
+			log("[Phase2C4B][TEST][ALL] PASS - normal play state restored")
+		else
+			log_error("[Phase2C4B][TEST][ALL] FAIL - see scenario logs")
+		end
+		return allPassed
 	end
 
 	@ExecSpace("ServerOnly")

@@ -6,6 +6,8 @@ script ThreeLaneSlot extends Component
 	@Sync
 	property boolean IsOccupied = false
 
+	property string OccupancyState = "Empty"
+
 	@ExecSpace("ClientOnly")
 	@EventSender("Self")
 	handler HandleTouchEvent(TouchEvent event)
@@ -24,6 +26,10 @@ script ThreeLaneSlot extends Component
 		end
 
 		if self.IsOccupied then
+			if self.OccupancyState == "Permanent" then
+				hud:SetCardHint("영구 설치된 슬롯입니다. 다음 턴에도 이 위치에서 재출전합니다.")
+				return
+			end
 			hud:SelectReservedSlot(self.Entity)
 			return
 		end
@@ -77,6 +83,7 @@ script ThreeLaneSlot extends Component
 
 		if accepted then
 			self.IsOccupied = true
+			self.OccupancyState = "Reserved"
 			if isvalid(self.Entity.SpriteRendererComponent) then
 				self.Entity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
 			end
@@ -93,6 +100,7 @@ script ThreeLaneSlot extends Component
 	method void ResetSlot()
 		-- 턴 정산과 재시작 시 슬롯 점유와 기본 파란색을 복구한다.
 		self.IsOccupied = false
+		self.OccupancyState = "Empty"
 		if isvalid(self.Entity.SpriteRendererComponent) then
 			self.Entity.SpriteRendererComponent.Color = Color(0.25, 0.65, 1.0, 0.85)
 		end

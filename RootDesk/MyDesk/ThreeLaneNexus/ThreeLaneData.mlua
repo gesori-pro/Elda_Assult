@@ -450,6 +450,23 @@ script ThreeLaneData extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method string GetCardImageRuid(string monsterId)
+		-- Phase 2C-4B 전투 카드에 사용하는 검증된 MSW 몬스터 표시 자원이다.
+		-- 전투 모델·애니메이션과 분리된 UI 전용 RUID이며 Phase 4에서 교체할 수 있다.
+		local ruids = {
+			slime = "87bdea59bedb4da6af43783dbf4d4141",
+			ribbon_pig = "0671164299e1440da94749006d5dae9c",
+			green_mushroom = "26dc03af6d454b15ac53a5ca055f5f05",
+			stone_golem = "006168737e2a4f80882a9e50fe5712ab",
+			yeti = "5b8a0d36a21641deb1ed83e15324d97e",
+			junior_balrog = "fb0ef47160994d4da5e671ae3ba23d61",
+			pink_bean = "caa0e4bc0b7146368bf453c67b731189",
+			orange_mushroom = "b871877a7c394eafb176a9fed9b7c415"
+		}
+		return ruids[monsterId] or "6d381bea1bcb4504b518a1fbfa0904ac"
+	end
+
+	@ExecSpace("ServerOnly")
 	method boolean ValidateDrakeReference()
 		-- 드레이크 실제 수치와 다섯 표시 등급이 모두 GDD 기준값 보통 3인지 검증한다.
 		local drake = self.MonsterById["drake"]
