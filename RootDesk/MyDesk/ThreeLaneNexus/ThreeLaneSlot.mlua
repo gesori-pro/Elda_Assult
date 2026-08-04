@@ -34,7 +34,7 @@ script ThreeLaneSlot extends Component
 	@ExecSpace("Server")
 	method void RequestPlaceUnit(integer cardIndex)
 		-- 서버에서 슬롯 점유와 페이즈를 다시 검증한 뒤 배치 명령을 보드에 기록한다.
-		if cardIndex < 1 or cardIndex > 7 then
+		if cardIndex < 1 or cardIndex > 8 then
 			log("[ThreeLaneSlot] Invalid card index: " .. tostring(cardIndex))
 			return
 		end

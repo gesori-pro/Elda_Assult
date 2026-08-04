@@ -88,13 +88,21 @@ script ThreeLaneData extends Component
 			return false
 		end
 
-		for cardIndex = 1, 7 do
+		for cardIndex = 1, 8 do
 			if self.MonsterByCardIndex[cardIndex] == nil then
 				log_error(
-					"[ThreeLaneData][FAIL] M1 card mapping missing CardIndex=" .. tostring(cardIndex)
+					"[ThreeLaneData][FAIL] runtime card mapping missing CardIndex=" .. tostring(cardIndex)
 				)
 				return false
 			end
+		end
+
+		local orange = self.MonsterByCardIndex[8]
+		if orange.MonsterId ~= "orange_mushroom"
+			or orange.PoolStatus ~= "DeckRuntime"
+			or orange.Cost ~= 1 then
+			log_error("[ThreeLaneData][FAIL] orange_mushroom runtime card contract mismatch")
+			return false
 		end
 
 		if not self:ValidateSecondaryAttackContract() then
@@ -288,6 +296,14 @@ script ThreeLaneData extends Component
 			return false
 		end
 
+		local ribbon = self.MonsterById["ribbon_pig"]
+		local balrog = self.MonsterById["junior_balrog"]
+		if ribbon == nil or ribbon.EffectDuration ~= "PermanentPlacement"
+			or balrog == nil or balrog.EffectDuration ~= "CurrentCombat" then
+			log_error("[ThreeLaneData][FAIL] reveal effect duration contract mismatch")
+			return false
+		end
+
 		if pink.SecondaryTargetLane ~= "Bottom"
 			or math.abs(pink.SecondaryDamageRate - 0.5) > 0.000001 then
 			log_error("[ThreeLaneData][FAIL] pink_bean secondary contract mismatch")
@@ -429,7 +445,7 @@ script ThreeLaneData extends Component
 
 	@ExecSpace("ServerOnly")
 	method any GetMonsterByCardIndex(integer cardIndex)
-		-- M1 기본 카드 인덱스와 연결된 몬스터 데이터를 반환한다.
+		-- M1 런타임 카드 인덱스와 연결된 몬스터 데이터를 반환한다.
 		return self.MonsterByCardIndex[cardIndex]
 	end
 
