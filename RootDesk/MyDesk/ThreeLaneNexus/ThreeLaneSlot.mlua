@@ -24,6 +24,9 @@ script ThreeLaneSlot extends Component
 			log_error("[ThreeLaneSlot] ThreeLaneHUD component not found")
 			return
 		end
+		if hud:HandleRibbonTargetSlotInput(self.SlotIndex) then
+			return
+		end
 
 		if self.IsOccupied then
 			if self.OccupancyState == "Permanent" then

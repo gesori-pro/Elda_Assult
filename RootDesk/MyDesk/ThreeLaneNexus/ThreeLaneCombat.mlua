@@ -142,6 +142,11 @@ script ThreeLaneCombat extends Component
 		else
 			self.SimulationSpeed = 2
 		end
+		for _, unit in ipairs(self.Units) do
+			if unit.IsTestUnit ~= true and isvalid(unit) then
+				unit:SetVisualPlaybackSpeed(self.SimulationSpeed)
+			end
+		end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -424,6 +429,9 @@ script ThreeLaneCombat extends Component
 			else
 				self:SetUnitVisualVelocity(unit, 0)
 			end
+			if unit.IsTestUnit ~= true and isvalid(unit) then
+				unit:RefreshLocomotionVisual(self.SimTick, shouldMove, self.SimulationSpeed)
+			end
 		end
 	end
 
@@ -471,6 +479,9 @@ script ThreeLaneCombat extends Component
 					)
 					unit.PendingExit = true
 					self:SetUnitVisualVelocity(unit, 0)
+					if unit.IsTestUnit ~= true and isvalid(unit) then
+						unit:PlayNexusFinalVisual(self.SimTick, self.SimulationSpeed)
+					end
 					log(
 						"[ThreeLaneCombat][AttackIntent] Tick="
 						.. tostring(self.SimTick)
@@ -511,6 +522,9 @@ script ThreeLaneCombat extends Component
 						}
 					)
 					table.insert(unit.AttackIntentTicks, self.SimTick)
+					if unit.IsTestUnit ~= true and isvalid(unit) then
+						unit:PlayAttackVisual(self.SimTick, self.SimulationSpeed)
+					end
 					table.insert(
 						unit.DamageIntentHistory,
 						{
@@ -637,6 +651,9 @@ script ThreeLaneCombat extends Component
 				if target ~= nil and target.Alive == true then
 					local before = target.HP
 					target.HP = target.HP - intent.Damage
+					if target.IsTestUnit ~= true and isvalid(target) then
+						target:PlayHitVisual(self.SimTick, self.SimulationSpeed)
+					end
 					log(
 						"[ThreeLaneCombat][Damage] Tick="
 						.. tostring(self.SimTick)
@@ -670,13 +687,16 @@ script ThreeLaneCombat extends Component
 				unit.DeathTick = self.SimTick
 				self:NotifyPermanentUnitResolved(unit)
 				self:SetUnitVisualVelocity(unit, 0)
+				if unit.IsTestUnit ~= true and isvalid(unit) then
+					unit:PlayDeathVisual(self.SimTick, self.SimulationSpeed)
+				end
 				log(
 					"[ThreeLaneCombat][Death] CombatUnitId="
 					.. tostring(unit.CombatUnitId)
 					.. ", DeathTick="
 					.. tostring(unit.DeathTick)
 				)
-				self:DestroyVisualEntity(unit)
+				self:DestroyVisualEntityAfter(unit, 0.50 / self.SimulationSpeed)
 			elseif unit.PendingExit == true then
 				unit.PendingExit = false
 				unit.Exited = true
@@ -688,7 +708,7 @@ script ThreeLaneCombat extends Component
 					.. ", Tick="
 					.. tostring(self.SimTick)
 				)
-				self:DestroyVisualEntity(unit)
+				self:DestroyVisualEntityAfter(unit, 0.40 / self.SimulationSpeed)
 			end
 		end
 	end
@@ -739,13 +759,16 @@ script ThreeLaneCombat extends Component
 			unit.DeathTick = self.SimTick
 			self:NotifyPermanentUnitResolved(unit)
 			self:SetUnitVisualVelocity(unit, 0)
+			if unit.IsTestUnit ~= true and isvalid(unit) then
+				unit:PlayDeathVisual(self.SimTick, self.SimulationSpeed)
+			end
 			log(
 				"[ThreeLaneCombat][TimeoutDeath] CombatUnitId="
 				.. tostring(unit.CombatUnitId)
 				.. ", DeathTick="
 				.. tostring(unit.DeathTick)
 			)
-			self:DestroyVisualEntity(unit)
+			self:DestroyVisualEntityAfter(unit, 0.50 / self.SimulationSpeed)
 		end
 	end
 
@@ -768,6 +791,17 @@ script ThreeLaneCombat extends Component
 		end
 		if isvalid(unit) and isvalid(unit.Entity) then
 			_EntityService:Destroy(unit.Entity)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DestroyVisualEntityAfter(any unit, number delaySeconds)
+		-- 논리 사망·퇴장은 즉시 레지스트리에서 제외하고 실제 엔티티만 짧은 표현 잔상 뒤 제거한다.
+		if unit == nil or unit.IsTestUnit == true then
+			return
+		end
+		if isvalid(unit) and isvalid(unit.Entity) then
+			unit.Entity:Destroy(delaySeconds)
 		end
 	end
 

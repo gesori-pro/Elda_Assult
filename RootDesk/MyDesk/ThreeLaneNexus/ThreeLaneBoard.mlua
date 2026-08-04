@@ -224,7 +224,10 @@ script ThreeLaneBoard extends Component
 				Cost = monster.Cost,
 				State = "Deck",
 				PermanentSlotIndex = 0,
-				PlacementOrder = 0
+				PlacementOrder = 0,
+				EffectTargetInstanceId = "",
+				EffectDestinationSlotIndex = 0,
+				RevealEffectResolved = false
 			}
 			state.InstanceById[instanceId] = instance
 			table.insert(state.Deck, instanceId)
@@ -759,7 +762,8 @@ script ThreeLaneBoard extends Component
 			placements = self.EnemyPendingPlacements
 		end
 		for _, command in ipairs(placements) do
-			if command.SlotIndex == slotIndex then
+			if command.SlotIndex == slotIndex
+				or command.EffectDestinationSlotIndex == slotIndex then
 				return true
 			end
 		end
@@ -791,6 +795,10 @@ script ThreeLaneBoard extends Component
 
 		if ownerSide ~= 1 and ownerSide ~= 2 then
 			log("[ThreeLaneBoard] Placement rejected - invalid owner side")
+			return false
+		end
+		if self:HasUnresolvedRibbonSelection(ownerSide) then
+			log("[Phase2C5][RibbonManual] Placement rejected - target selection incomplete")
 			return false
 		end
 
@@ -847,9 +855,7 @@ script ThreeLaneBoard extends Component
 			self.PlacementSerial = order
 			self.CurrentCost = availableCost - instance.Cost
 		end
-		table.insert(
-			placements,
-			{
+		local command = {
 				Order = order,
 				CardIndex = instance.CardIndex,
 				MonsterId = instance.MonsterId,
@@ -859,9 +865,16 @@ script ThreeLaneBoard extends Component
 				Position = position,
 				OwnerUserId = ownerUserId,
 				OwnerSide = ownerSide,
-				OriginalHandIndex = handIndex
+				OriginalHandIndex = handIndex,
+				EffectSelectionState = "NotApplicable",
+				EffectTargetInstanceId = "",
+				EffectDestinationSlotIndex = 0
 			}
-		)
+		table.insert(placements, command)
+		if monster.EffectType == "MoveDownOneLane"
+			and monster.EffectTarget == "EarlierAllySameColumn" then
+			self:InitializeRibbonEffectSelection(ownerSide, command)
+		end
 		self.PendingCount = #self.PendingPlacements
 		self.EnemyPendingCount = #self.EnemyPendingPlacements
 		self:SyncPublicCardCounts()
@@ -869,6 +882,7 @@ script ThreeLaneBoard extends Component
 			self:RefreshUsedCardMask()
 			self:RefreshPlayerSlotOccupancy()
 			self:SendPrivateCardState("Reserve", instance)
+			self:SendRibbonEffectSelectionState(command)
 		end
 
 		log(
@@ -886,6 +900,286 @@ script ThreeLaneBoard extends Component
 			.. tostring(availableCost - instance.Cost)
 		)
 		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetPlacementsForSide(integer ownerSide)
+		if ownerSide == 2 then
+			return self.EnemyPendingPlacements
+		end
+		return self.PendingPlacements
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer FindPlacementCommandIndex(integer ownerSide, string sourceInstanceId)
+		for index, command in ipairs(self:GetPlacementsForSide(ownerSide)) do
+			if command.CardInstanceId == sourceInstanceId then
+				return index
+			end
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsRibbonDestinationOccupied(integer ownerSide, integer slotIndex, string ignoredSourceInstanceId)
+		if self:IsPermanentSlotOccupied(ownerSide, slotIndex) then
+			return true
+		end
+		for _, command in ipairs(self:GetPlacementsForSide(ownerSide)) do
+			if command.SlotIndex == slotIndex then
+				return true
+			end
+			if command.CardInstanceId ~= ignoredSourceInstanceId
+				and command.EffectDestinationSlotIndex == slotIndex then
+				return true
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildRibbonEffectCandidates(integer ownerSide, any sourceCommand)
+		local candidates = {}
+		if sourceCommand == nil then
+			return candidates
+		end
+		local state = self:GetCardState(ownerSide)
+		if state == nil or state.InstanceById == nil then
+			return candidates
+		end
+		local sourceIndex = self:FindPlacementCommandIndex(ownerSide, sourceCommand.CardInstanceId)
+		local sourceOrder = state.NextPlacementOrder + sourceIndex
+		for _, instanceId in ipairs(state.Installed) do
+			local instance = state.InstanceById[instanceId]
+			if instance ~= nil
+				and instance.PlacementOrder > 0
+				and instance.PlacementOrder < sourceOrder then
+				local slotIndex = instance.PermanentSlotIndex
+				local laneIndex = math.floor((slotIndex - 1) / 5) + 1
+				local destinationSlot = slotIndex + 5
+				if laneIndex < 3
+					and not self:IsRibbonDestinationOccupied(ownerSide, destinationSlot, sourceCommand.CardInstanceId) then
+					table.insert(candidates, {
+						InstanceId = instance.InstanceId,
+						SlotIndex = slotIndex,
+						DestinationSlotIndex = destinationSlot,
+						PlacementOrder = instance.PlacementOrder
+					})
+				end
+			end
+		end
+		local placements = self:GetPlacementsForSide(ownerSide)
+		for index = 1, sourceIndex - 1 do
+			local command = placements[index]
+			local instance = state.InstanceById[command.CardInstanceId]
+			if instance ~= nil then
+				local slotIndex = command.SlotIndex
+				local laneIndex = math.floor((slotIndex - 1) / 5) + 1
+				local destinationSlot = slotIndex + 5
+				if laneIndex < 3
+					and not self:IsRibbonDestinationOccupied(ownerSide, destinationSlot, sourceCommand.CardInstanceId) then
+					table.insert(candidates, {
+						InstanceId = instance.InstanceId,
+						SlotIndex = slotIndex,
+						DestinationSlotIndex = destinationSlot,
+						PlacementOrder = state.NextPlacementOrder + index
+					})
+				end
+			end
+		end
+		table.sort(candidates, function(a, b)
+			if a.PlacementOrder == b.PlacementOrder then
+				return a.InstanceId < b.InstanceId
+			end
+			return a.PlacementOrder > b.PlacementOrder
+		end)
+		return candidates
+	end
+
+	@ExecSpace("ServerOnly")
+	method void InitializeRibbonEffectSelection(integer ownerSide, any command)
+		local candidates = self:BuildRibbonEffectCandidates(ownerSide, command)
+		command.EffectTargetInstanceId = ""
+		command.EffectDestinationSlotIndex = 0
+		if #candidates == 0 then
+			command.EffectSelectionState = "NoTarget"
+			log(
+				"[Phase2C5][RibbonManual] NoTarget Side="
+				.. tostring(ownerSide)
+				.. ", Source=" .. command.CardInstanceId
+			)
+			return
+		end
+		command.EffectSelectionState = "Selecting"
+		if ownerSide == 2 then
+			self:ApplyRibbonTargetSelection(command, candidates[1])
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyRibbonTargetSelection(any command, any candidate)
+		command.EffectSelectionState = "Selected"
+		command.EffectTargetInstanceId = candidate.InstanceId
+		command.EffectDestinationSlotIndex = candidate.DestinationSlotIndex
+		log(
+			"[Phase2C5][RibbonManual] Selected Side="
+			.. tostring(command.OwnerSide)
+			.. ", Source=" .. command.CardInstanceId
+			.. ", Target=" .. candidate.InstanceId
+			.. ", Slot=" .. tostring(candidate.SlotIndex)
+			.. "->" .. tostring(candidate.DestinationSlotIndex)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TrySelectRibbonEffectTarget(integer ownerSide, string sourceInstanceId, string targetInstanceId)
+		local sourceIndex = self:FindPlacementCommandIndex(ownerSide, sourceInstanceId)
+		if sourceIndex == 0 then
+			return false
+		end
+		local command = self:GetPlacementsForSide(ownerSide)[sourceIndex]
+		if command.EffectSelectionState ~= "Selecting"
+			and command.EffectSelectionState ~= "Selected" then
+			return false
+		end
+		local candidates = self:BuildRibbonEffectCandidates(ownerSide, command)
+		for _, candidate in ipairs(candidates) do
+			if candidate.InstanceId == targetInstanceId then
+				self:ApplyRibbonTargetSelection(command, candidate)
+				return true
+			end
+		end
+		log_warning(
+			"[Phase2C5][RibbonManual] rejected invalid target Source="
+			.. sourceInstanceId
+			.. ", Target=" .. targetInstanceId
+		)
+		return false
+	end
+
+	@ExecSpace("Server")
+	method void RequestSelectRibbonEffectTarget(string sourceInstanceId, string targetInstanceId)
+		if self.PlayerOwnerUserId ~= "" and senderUserId ~= self.PlayerOwnerUserId then
+			log_warning("[Phase2C5][RibbonManual] rejected - owner mismatch")
+			return
+		end
+		if self.Phase ~= "Placement" or self.BattleState ~= "Playing" then
+			return
+		end
+		if self:TrySelectRibbonEffectTarget(1, sourceInstanceId, targetInstanceId) then
+			local index = self:FindPlacementCommandIndex(1, sourceInstanceId)
+			self:SendRibbonEffectSelectionState(self.PendingPlacements[index])
+		else
+			local index = self:FindPlacementCommandIndex(1, sourceInstanceId)
+			if index > 0 then
+				self:SendRibbonEffectSelectionState(self.PendingPlacements[index])
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean HasUnresolvedRibbonSelection(integer ownerSide)
+		for _, command in ipairs(self:GetPlacementsForSide(ownerSide)) do
+			if command.EffectSelectionState == "Selecting" then
+				return true
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReconcileRibbonEffectSelections(integer ownerSide)
+		local placements = self:GetPlacementsForSide(ownerSide)
+		for _, command in ipairs(placements) do
+			if command.MonsterId == "ribbon_pig" then
+				command.PreviousEffectTargetInstanceId = command.EffectTargetInstanceId or ""
+				command.EffectTargetInstanceId = ""
+				command.EffectDestinationSlotIndex = 0
+			end
+		end
+		for _, command in ipairs(placements) do
+			if command.MonsterId == "ribbon_pig" then
+				local selectedId = command.PreviousEffectTargetInstanceId or ""
+				local candidates = self:BuildRibbonEffectCandidates(ownerSide, command)
+				local selected = nil
+				for _, candidate in ipairs(candidates) do
+					if candidate.InstanceId == selectedId then
+						selected = candidate
+						break
+					end
+				end
+				if selected ~= nil then
+					self:ApplyRibbonTargetSelection(command, selected)
+				elseif selectedId ~= "" then
+					-- 이미 고른 대상이 Undo 등으로 사라졌다면 자동 무효화로 확정하지 않는다.
+					-- 후보가 0기여도 리본돼지 예약을 취소하거나 새 유효 대상을 만들기 전까지 확정을 막는다.
+					command.EffectSelectionState = "Selecting"
+					command.EffectTargetInstanceId = ""
+					command.EffectDestinationSlotIndex = 0
+				elseif #candidates > 0 then
+					command.EffectSelectionState = "Selecting"
+					command.EffectTargetInstanceId = ""
+					command.EffectDestinationSlotIndex = 0
+				else
+					command.EffectSelectionState = "NoTarget"
+					command.EffectTargetInstanceId = ""
+					command.EffectDestinationSlotIndex = 0
+				end
+				command.PreviousEffectTargetInstanceId = nil
+			end
+		end
+		if ownerSide == 1 then
+			local sent = false
+			for _, command in ipairs(self.PendingPlacements) do
+				if command.MonsterId == "ribbon_pig" and command.EffectSelectionState == "Selecting" then
+					self:SendRibbonEffectSelectionState(command)
+					sent = true
+					break
+				end
+			end
+			if not sent then
+				self:ClientReceiveRibbonEffectSelection("", "Idle", "", self.PlayerOwnerUserId)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SendRibbonEffectSelectionState(any command)
+		if self.PlayerOwnerUserId == "" or command == nil or command.MonsterId ~= "ribbon_pig" then
+			return
+		end
+		local candidates = self:BuildRibbonEffectCandidates(1, command)
+		local records = {}
+		for _, candidate in ipairs(candidates) do
+			if command.EffectSelectionState ~= "Selected"
+				or candidate.InstanceId == command.EffectTargetInstanceId then
+				table.insert(
+					records,
+					candidate.InstanceId
+						.. ":" .. tostring(candidate.SlotIndex)
+						.. ":" .. tostring(candidate.DestinationSlotIndex)
+				)
+			end
+		end
+		self:ClientReceiveRibbonEffectSelection(
+			command.CardInstanceId,
+			command.EffectSelectionState,
+			table.concat(records, ","),
+			self.PlayerOwnerUserId
+		)
+	end
+
+	@ExecSpace("Client")
+	method void ClientReceiveRibbonEffectSelection(string sourceInstanceId, string state, string payload)
+		local controller = _EntityService:GetEntityByPath("/ui/ThreeLaneHUD/Controller")
+		if not isvalid(controller) then
+			return
+		end
+		---@type ThreeLaneHUD
+		local hud = controller:GetComponent("script.ThreeLaneHUD")
+		if isvalid(hud) then
+			hud:ReceiveRibbonEffectSelection(sourceInstanceId, state, payload)
+		end
 	end
 
 	@ExecSpace("Server")
@@ -994,6 +1288,7 @@ script ThreeLaneBoard extends Component
 
 		table.remove(self.PendingPlacements, commandIndex)
 		self:ReorderPlacements()
+		self:ReconcileRibbonEffectSelections(1)
 		self.PendingCount = #self.PendingPlacements
 		self:SyncPublicCardCounts()
 		self:RefreshUsedCardMask()
@@ -1075,6 +1370,16 @@ script ThreeLaneBoard extends Component
 			log("[ThreeLaneBoard] Confirm ignored - phase is " .. self.Phase)
 			return
 		end
+		if self:HasUnresolvedRibbonSelection(1) then
+			log("[Phase2C5][RibbonManual] Confirm rejected - target selection incomplete")
+			for _, command in ipairs(self.PendingPlacements) do
+				if command.EffectSelectionState == "Selecting" then
+					self:SendRibbonEffectSelectionState(command)
+					break
+				end
+			end
+			return
+		end
 
 		self:EnterReveal()
 	end
@@ -1115,6 +1420,9 @@ script ThreeLaneBoard extends Component
 		self:RefreshUsedCardMask()
 		self:RefreshPlayerSlotOccupancy()
 		self:SendPrivateCardState("Install", nil)
+		if self.PlayerOwnerUserId ~= "" then
+			self:ClientReceiveRibbonEffectSelection("", "Idle", "", self.PlayerOwnerUserId)
+		end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1135,6 +1443,9 @@ script ThreeLaneBoard extends Component
 				instance.State = "Installed"
 				instance.PermanentSlotIndex = command.SlotIndex
 				instance.PlacementOrder = state.NextPlacementOrder
+				instance.EffectTargetInstanceId = command.EffectTargetInstanceId or ""
+				instance.EffectDestinationSlotIndex = command.EffectDestinationSlotIndex or 0
+				instance.RevealEffectResolved = false
 				command.Order = instance.PlacementOrder
 				table.insert(state.Installed, instance.InstanceId)
 				log(
@@ -1183,8 +1494,11 @@ script ThreeLaneBoard extends Component
 						Cost = instance.Cost,
 						SlotIndex = instance.PermanentSlotIndex,
 						Position = position,
-						OwnerUserId = ownerSide == 2 and "EnemyAI" or "Player",
-						OwnerSide = ownerSide
+					OwnerUserId = ownerSide == 2 and "EnemyAI" or "Player",
+					OwnerSide = ownerSide,
+					EffectTargetInstanceId = instance.EffectTargetInstanceId or "",
+					EffectDestinationSlotIndex = instance.EffectDestinationSlotIndex or 0,
+					RevealEffectResolved = instance.RevealEffectResolved == true
 					}
 				)
 			end
@@ -1272,6 +1586,9 @@ script ThreeLaneBoard extends Component
 		unitComponent.NexusDamage = monster.NexusDamage
 		unitComponent.SecondaryTargetLane = monster.SecondaryTargetLane
 		unitComponent.SecondaryDamageRate = monster.SecondaryDamageRate
+		unitComponent.RevealEffectTargetInstanceId = command.EffectTargetInstanceId or ""
+		unitComponent.RevealEffectDestinationSlotIndex = command.EffectDestinationSlotIndex or 0
+		unitComponent.RevealEffectResolved = command.RevealEffectResolved == true
 		unitComponent.SimX = command.Position.x
 		unitComponent.CombatStartX = command.Position.x
 		unitComponent.CombatStartY = command.Position.y
@@ -1279,9 +1596,16 @@ script ThreeLaneBoard extends Component
 		if ownerSide == 2 then
 			unitComponent.TargetNexusX = -5.35
 		end
+		local data = self:GetData()
+		local visualProfile = nil
+		if isvalid(data) then
+			visualProfile = data:GetCombatVisualProfile(monster.MonsterId)
+		end
 
 		if isvalid(unit.SpriteRendererComponent) then
-			if ownerSide == 2 then
+			if visualProfile ~= nil then
+				unit.SpriteRendererComponent.Color = Color(1.0, 1.0, 1.0, 1.0)
+			elseif ownerSide == 2 then
 				unit.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.45, 1.0)
 			else
 				unit.SpriteRendererComponent.Color = Color(0.45, 0.75, 1.0, 1.0)
@@ -1295,6 +1619,7 @@ script ThreeLaneBoard extends Component
 			return
 		end
 		combat:RegisterUnit(unitComponent)
+		unitComponent:InitializePresentation(visualProfile, self.SimSpeed)
 		table.insert(self.ActiveUnits, unit)
 
 		log(
@@ -1392,6 +1717,7 @@ script ThreeLaneBoard extends Component
 				if monster ~= nil
 					and monster.EffectType ~= ""
 					and monster.EffectType ~= "None"
+					and not (monster.EffectType == "MoveDownOneLane" and unit.RevealEffectResolved == true)
 					and (monster.EffectDuration == "CurrentCombat"
 						or monster.EffectDuration == "PermanentPlacement") then
 					table.insert(sources, { Unit = unit, Monster = monster })
@@ -1424,17 +1750,25 @@ script ThreeLaneBoard extends Component
 
 		if monster.EffectType == "MoveDownOneLane"
 			and monster.EffectTarget == "EarlierAllySameColumn" then
-			local candidates = self:GetRevealEffectCandidates(source, monster.EffectTarget)
-			if #candidates > 0 then
-				self:MoveRevealUnitDownOneLane(source, candidates[1])
+			local target = self:FindRevealUnitByInstanceId(source.RevealEffectTargetInstanceId)
+			local valid = self:IsManualRibbonRevealTargetValid(source, target)
+			if valid then
+				self:MoveRevealUnitDownOneLane(source, target)
+			elseif source.IsTestUnit == true
+				and (source.RevealEffectTargetInstanceId == nil or source.RevealEffectTargetInstanceId == "") then
+				-- Phase 2C-3A 과거 회귀 테이블은 런타임 카드 인스턴스가 없으므로 테스트에서만 옛 후보를 명시적으로 재사용한다.
+				local candidates = self:GetRevealEffectCandidates(source, monster.EffectTarget)
+				if #candidates > 0 then
+					self:MoveRevealUnitDownOneLane(source, candidates[1])
+				end
 			else
 				log(
-					"[Phase2C3A][MoveDownOneLane] NoTarget Source="
+					"[Phase2C5][RibbonManual] RevealNoTarget Source="
 					.. tostring(source.CombatUnitId)
-					.. ", Order="
-					.. tostring(source.PlacementOrder)
+					.. ", TargetInstance=" .. tostring(source.RevealEffectTargetInstanceId)
 				)
 			end
+			self:MarkRibbonRevealResolved(source)
 			return
 		end
 
@@ -1457,6 +1791,56 @@ script ThreeLaneBoard extends Component
 					.. tostring(source.PlacementOrder)
 				)
 			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method any FindRevealUnitByInstanceId(string instanceId)
+		if instanceId == nil or instanceId == "" then
+			return nil
+		end
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			return nil
+		end
+		for _, unit in ipairs(combat:BuildStableSnapshot()) do
+			if unit.CardInstanceId == instanceId then
+				return unit
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsManualRibbonRevealTargetValid(any source, any target)
+		if source == nil or target == nil then
+			return false
+		end
+		local destinationSlot = target.SlotIndex + 5
+		return target.OwnerSide == source.OwnerSide
+			and target.PlacementOrder > 0
+			and target.PlacementOrder < source.PlacementOrder
+			and target.LaneIndex < 3
+			and source.RevealEffectDestinationSlotIndex == destinationSlot
+			and not self:IsRevealSlotOccupied(target.OwnerSide, destinationSlot, target.CombatUnitId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkRibbonRevealResolved(any source)
+		if source == nil then
+			return
+		end
+		source.RevealEffectResolved = true
+		if source.CardInstanceId == nil or source.CardInstanceId == "" then
+			return
+		end
+		local state = self:GetCardState(source.OwnerSide)
+		if state == nil or state.InstanceById == nil then
+			return
+		end
+		local instance = state.InstanceById[source.CardInstanceId]
+		if instance ~= nil then
+			instance.RevealEffectResolved = true
 		end
 	end
 
@@ -2162,6 +2546,9 @@ script ThreeLaneBoard extends Component
 			local instance = state.InstanceById[instanceId]
 			instance.PermanentSlotIndex = 0
 			instance.PlacementOrder = 0
+			instance.EffectTargetInstanceId = ""
+			instance.EffectDestinationSlotIndex = 0
+			instance.RevealEffectResolved = false
 			if used[instanceId] == true then
 				instance.State = "Hand"
 				table.insert(state.Hand, instanceId)
@@ -2196,6 +2583,9 @@ script ThreeLaneBoard extends Component
 		instance.State = "Installed"
 		instance.PermanentSlotIndex = slotIndex
 		instance.PlacementOrder = order
+		instance.EffectTargetInstanceId = ""
+		instance.EffectDestinationSlotIndex = 0
+		instance.RevealEffectResolved = false
 		state.NextPlacementOrder = math.max(state.NextPlacementOrder, order)
 		if self:FindIdIndex(state.Installed, instanceId) == 0 then
 			table.insert(state.Installed, instanceId)
@@ -2393,6 +2783,10 @@ script ThreeLaneBoard extends Component
 		local moveIds = self:ForceTestHand(1, { "slime", "ribbon_pig" })
 		self:InstallCardForTest(1, moveIds[1], 3, 1)
 		self:InstallCardForTest(1, moveIds[2], 13, 2)
+		local moveRibbonInstance = self.PlayerCardState.InstanceById[moveIds[2]]
+		moveRibbonInstance.EffectTargetInstanceId = moveIds[1]
+		moveRibbonInstance.EffectDestinationSlotIndex = 8
+		moveRibbonInstance.RevealEffectResolved = false
 		combat:PrepareReveal()
 		self:SpawnInstalledCards(1)
 		self:ResolveRevealEffects()
@@ -2965,6 +3359,7 @@ script ThreeLaneBoard extends Component
 		local ids = { "slime", "ribbon_pig", "junior_balrog" }
 		local slots = { 3, 13, 1 }
 		for ownerSide = 1, 2 do
+			local targetInstanceId = "P2C3A_" .. tostring(ownerSide) .. "_TARGET"
 			for index = 1, 3 do
 				local monster = data:GetMonsterById(ids[index])
 				local position = self:GetSlotWorldPosition(ownerSide, slots[index])
@@ -2976,11 +3371,17 @@ script ThreeLaneBoard extends Component
 						Order = index,
 						CardIndex = monster.CardIndex,
 						MonsterId = monster.MonsterId,
+						CardInstanceId = index == 1
+							and targetInstanceId
+							or ("P2C3A_" .. tostring(ownerSide) .. "_" .. tostring(index)),
 						Cost = monster.Cost,
 						SlotIndex = slots[index],
 						Position = position,
 						OwnerUserId = "Phase2C3ARegression",
-						OwnerSide = ownerSide
+						OwnerSide = ownerSide,
+						EffectTargetInstanceId = index == 2 and targetInstanceId or "",
+						EffectDestinationSlotIndex = index == 2 and 8 or 0,
+						RevealEffectResolved = false
 					}
 				)
 			end
@@ -3437,6 +3838,358 @@ script ThreeLaneBoard extends Component
 			log("[Phase2C4B][TEST][ALL] PASS - normal play state restored")
 		else
 			log_error("[Phase2C4B][TEST][ALL] FAIL - see scenario logs")
+		end
+		return allPassed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RecordPhase2C5Regression(string name, boolean passed)
+		if passed then
+			log("[Phase2C5][TEST][" .. name .. "] PASS")
+		else
+			log_error("[Phase2C5][TEST][" .. name .. "] FAIL")
+		end
+		return passed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C5RibbonScenario(string scenarioName)
+		if not self:PreparePhase2C4ATestState(5200, 10200) then
+			return false
+		end
+		self.PlayerOwnerUserId = ""
+
+		if scenarioName == "OneCandidate" then
+			local ids = self:ForceTestHand(1, { "slime", "ribbon_pig" })
+			if #ids ~= 2 or not self:InstallCardForTest(1, ids[1], 1, 1) then return false end
+			if not self:TryReserveCardInstance(1, 15, ids[2], "MakerC5") then return false end
+			local command = self.PendingPlacements[1]
+			local candidates = self:BuildRibbonEffectCandidates(1, command)
+			self:RequestConfirmPlacement()
+			local confirmBlocked = self.Phase == "Placement" and self:HasUnresolvedRibbonSelection(1)
+			return #candidates == 1
+				and candidates[1].InstanceId == ids[1]
+				and confirmBlocked
+				and self:TrySelectRibbonEffectTarget(1, ids[2], ids[1])
+				and command.EffectSelectionState == "Selected"
+				and command.EffectDestinationSlotIndex == 6
+		end
+
+		if scenarioName == "MultipleCandidates" then
+			local ids = self:ForceTestHand(
+				1,
+				{ "slime", "orange_mushroom", "ribbon_pig", "green_mushroom" }
+			)
+			if #ids ~= 4 then return false end
+			if not self:InstallCardForTest(1, ids[1], 1, 1) then return false end
+			if not self:InstallCardForTest(1, ids[2], 7, 2) then return false end
+			if not self:TryReserveCardInstance(1, 15, ids[3], "MakerC5") then return false end
+			local command = self.PendingPlacements[1]
+			local candidates = self:BuildRibbonEffectCandidates(1, command)
+			local selected = self:TrySelectRibbonEffectTarget(1, ids[3], ids[1])
+			local destinationBlocked = not self:TryReserveCardInstance(1, 6, ids[4], "MakerC5")
+			return #candidates == 2
+				and candidates[1].InstanceId == ids[2]
+				and candidates[2].InstanceId == ids[1]
+				and selected
+				and command.EffectTargetInstanceId == ids[1]
+				and command.EffectDestinationSlotIndex == 6
+				and destinationBlocked
+		end
+
+		if scenarioName == "NoCandidate" then
+			local ids = self:ForceTestHand(1, { "ribbon_pig" })
+			if #ids ~= 1 or not self:TryReserveCardInstance(1, 15, ids[1], "MakerC5") then return false end
+			local command = self.PendingPlacements[1]
+			return command.EffectSelectionState == "NoTarget"
+				and command.EffectTargetInstanceId == ""
+				and not self:HasUnresolvedRibbonSelection(1)
+		end
+
+		if scenarioName == "BlockedDestination" then
+			local ids = self:ForceTestHand(
+				1,
+				{ "slime", "orange_mushroom", "green_mushroom", "ribbon_pig" }
+			)
+			if #ids ~= 4 then return false end
+			if not self:InstallCardForTest(1, ids[1], 1, 1) then return false end
+			if not self:InstallCardForTest(1, ids[2], 6, 2) then return false end
+			if not self:InstallCardForTest(1, ids[3], 11, 3) then return false end
+			if not self:TryReserveCardInstance(1, 15, ids[4], "MakerC5") then return false end
+			local command = self.PendingPlacements[1]
+			return #self:BuildRibbonEffectCandidates(1, command) == 0
+				and command.EffectSelectionState == "NoTarget"
+		end
+
+		if scenarioName == "TargetUndo" then
+			local ids = self:ForceTestHand(1, { "slime", "ribbon_pig" })
+			if #ids ~= 2 then return false end
+			if not self:TryReserveCardInstance(1, 1, ids[1], "MakerC5") then return false end
+			if not self:TryReserveCardInstance(1, 15, ids[2], "MakerC5") then return false end
+			if not self:TrySelectRibbonEffectTarget(1, ids[2], ids[1]) then return false end
+			self:CancelPlacementAt(1, "MakerC5", "Phase2C5TargetUndo")
+			local command = self.PendingPlacements[1]
+			local blocked = command ~= nil
+				and command.CardInstanceId == ids[2]
+				and command.EffectSelectionState == "Selecting"
+				and self:HasUnresolvedRibbonSelection(1)
+			if blocked then
+				self:CancelPlacementAt(1, "MakerC5", "Phase2C5RibbonCancel")
+			end
+			local state = self:GetCardState(1)
+			return blocked
+				and #self.PendingPlacements == 0
+				and state.InstanceById[ids[2]].State == "Hand"
+				and self.CurrentCost == 10
+		end
+
+		if scenarioName == "SelectedReveal" then
+			local ids = self:ForceTestHand(1, { "slime", "ribbon_pig" })
+			if #ids ~= 2 or not self:InstallCardForTest(1, ids[1], 1, 1) then return false end
+			if not self:TryReserveCardInstance(1, 15, ids[2], "MakerC5") then return false end
+			if not self:TrySelectRibbonEffectTarget(1, ids[2], ids[1]) then return false end
+			self:CommitPendingPlacements(1)
+			self:SpawnInstalledCards(1)
+			if not self:ResolveRevealEffects() then return false end
+			local target = self:FindActiveUnitByInstanceId(ids[1])
+			local source = self:FindActiveUnitByInstanceId(ids[2])
+			local state = self:GetCardState(1)
+			return target ~= nil and isvalid(target)
+				and source ~= nil and isvalid(source)
+				and target.SlotIndex == 6
+				and target.LaneIndex == 2
+				and state.InstanceById[ids[1]].PermanentSlotIndex == 6
+				and source.RevealEffectResolved == true
+				and self:GetCombat().SimTick == 0
+		end
+
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C5PresentationRegression()
+		if not self:PreparePhase2C4ATestState(5290, 10290) then
+			return false
+		end
+		local combat = self:GetCombat()
+		self:SpawnPlacement({
+			Order = 1, CardIndex = 8, MonsterId = "orange_mushroom",
+			CardInstanceId = "C5_VIS_ORANGE", SlotIndex = 1,
+			Position = self:GetSlotWorldPosition(1, 1), OwnerSide = 1, OwnerUserId = "",
+			EffectTargetInstanceId = "", EffectDestinationSlotIndex = 0, RevealEffectResolved = false
+		})
+		self:SpawnPlacement({
+			Order = 2, CardIndex = 3, MonsterId = "green_mushroom",
+			CardInstanceId = "C5_VIS_GREEN", SlotIndex = 7,
+			Position = self:GetSlotWorldPosition(2, 7), OwnerSide = 2, OwnerUserId = "",
+			EffectTargetInstanceId = "", EffectDestinationSlotIndex = 0, RevealEffectResolved = false
+		})
+		self:SpawnPlacement({
+			Order = 3, CardIndex = 5, MonsterId = "yeti",
+			CardInstanceId = "C5_VIS_YETI", SlotIndex = 13,
+			Position = self:GetSlotWorldPosition(1, 13), OwnerSide = 1, OwnerUserId = "",
+			EffectTargetInstanceId = "", EffectDestinationSlotIndex = 0, RevealEffectResolved = false
+		})
+		local orange = self:FindActiveUnitByInstanceId("C5_VIS_ORANGE")
+		local green = self:FindActiveUnitByInstanceId("C5_VIS_GREEN")
+		local yeti = self:FindActiveUnitByInstanceId("C5_VIS_YETI")
+		if orange == nil or green == nil or yeti == nil
+			or not isvalid(orange) or not isvalid(green) or not isvalid(yeti) then
+			return false
+		end
+		local orangeProfile = self:GetData():GetCombatVisualProfile("orange_mushroom")
+		local greenProfile = self:GetData():GetCombatVisualProfile("green_mushroom")
+		local yetiProfile = self:GetData():GetCombatVisualProfile("yeti")
+		local profilePassed = orangeProfile ~= nil and greenProfile ~= nil and yetiProfile ~= nil
+			and orange.HasCombatVisualProfile and green.HasCombatVisualProfile and yeti.HasCombatVisualProfile
+			and orange.Entity.SpriteRendererComponent.SpriteRUID == orangeProfile.IdleRuid
+			and green.Entity.SpriteRendererComponent.SpriteRUID == greenProfile.IdleRuid
+			and yeti.Entity.SpriteRendererComponent.SpriteRUID == yetiProfile.IdleRuid
+			and orange.Entity.SpriteRendererComponent.FlipX == true
+			and green.Entity.SpriteRendererComponent.FlipX == false
+
+		orange:RefreshLocomotionVisual(1, true, 1)
+		local movePassed = orange.VisualState == "Move"
+			and orange.Entity.SpriteRendererComponent.SpriteRUID == orangeProfile.MoveRuid
+		orange:PlayAttackVisual(2, 1)
+		local attackPassed = orange.VisualState == "Attack"
+			and orange.Entity.SpriteRendererComponent.SpriteRUID == orangeProfile.AttackRuid
+		orange:PlayHitVisual(3, 1)
+		local hitPassed = orange.VisualState == "Hit"
+			and orange.Entity.SpriteRendererComponent.SpriteRUID == orangeProfile.HitRuid
+		yeti:PlayNexusFinalVisual(4, 1)
+		local nexusPassed = yeti.VisualState == "Nexus"
+			and yeti.Entity.SpriteRendererComponent.SpriteRUID == yetiProfile.NexusRuid
+		green:PlayDeathVisual(5, 1)
+		local greenBar = green.Entity:GetChildByName("HealthBarBack")
+		local deathPassed = green.VisualState == "Die"
+			and green.Entity.SpriteRendererComponent.SpriteRUID == greenProfile.DieRuid
+			and isvalid(greenBar) and greenBar.Enable == false
+
+		local fill = orange.Entity:GetChildByName("HealthBarFill")
+		local back = orange.Entity:GetChildByName("HealthBarBack")
+		orange.HP = orange.MaxHP / 2
+		orange:UpdateHealthBarVisual()
+		local halfWidth = orange.HealthBarWidthScale * 0.5
+		local damageBarPassed = isvalid(fill) and isvalid(back)
+			and math.abs(fill.TransformComponent.Scale.x - halfWidth) <= 0.0001
+		orange.HP = orange.MaxHP
+		orange:ResetCombatState()
+		local respawnBarPassed = back.Enable == true and fill.Enable == true
+			and math.abs(fill.TransformComponent.Scale.x - orange.HealthBarWidthScale) <= 0.0001
+
+		combat:SetSimulationSpeed(2)
+		local speed2Passed = orange.VisualPlaybackSpeed == 2
+			and green.VisualPlaybackSpeed == 2
+			and yeti.VisualPlaybackSpeed == 2
+			and orange.Entity.SpriteRendererComponent.PlayRate == 2
+		combat:SetSimulationSpeed(1)
+		local speed1Passed = orange.VisualPlaybackSpeed == 1
+			and green.VisualPlaybackSpeed == 1
+			and yeti.VisualPlaybackSpeed == 1
+			and orange.Entity.SpriteRendererComponent.PlayRate == 1
+
+		return profilePassed and movePassed and attackPassed and hitPassed
+			and nexusPassed and deathPassed and damageBarPassed and respawnBarPassed
+			and speed2Passed and speed1Passed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C5ExpandedPresentationRegression()
+		-- 3종 세로 슬라이스 통과 뒤 기본 8종 모두 같은 표현 상태·체력바 계약을 쓰는지 실제 엔티티로 확인한다.
+		if not self:PreparePhase2C4ATestState(5291, 10291) then
+			return false
+		end
+		local combat = self:GetCombat()
+		local data = self:GetData()
+		local entries = {
+			{ MonsterId = "slime", Side = 1, Slot = 1 },
+			{ MonsterId = "ribbon_pig", Side = 2, Slot = 2 },
+			{ MonsterId = "orange_mushroom", Side = 1, Slot = 3 },
+			{ MonsterId = "green_mushroom", Side = 2, Slot = 4 },
+			{ MonsterId = "stone_golem", Side = 1, Slot = 6 },
+			{ MonsterId = "yeti", Side = 2, Slot = 7 },
+			{ MonsterId = "junior_balrog", Side = 1, Slot = 8 },
+			{ MonsterId = "pink_bean", Side = 2, Slot = 9 }
+		}
+
+		for index, entry in ipairs(entries) do
+			local monster = data:GetMonsterById(entry.MonsterId)
+			local position = self:GetSlotWorldPosition(entry.Side, entry.Slot)
+			if monster == nil or position == nil then return false end
+			self:SpawnPlacement({
+				Order = index,
+				CardIndex = monster.CardIndex,
+				MonsterId = entry.MonsterId,
+				CardInstanceId = "C5_VIS8_" .. entry.MonsterId,
+				SlotIndex = entry.Slot,
+				Position = position,
+				OwnerSide = entry.Side,
+				OwnerUserId = "",
+				EffectTargetInstanceId = "",
+				EffectDestinationSlotIndex = 0,
+				RevealEffectResolved = false
+			})
+		end
+
+		local allPassed = #combat.Units == 8
+		for _, entry in ipairs(entries) do
+			local instanceId = "C5_VIS8_" .. entry.MonsterId
+			local unit = self:FindActiveUnitByInstanceId(instanceId)
+			local profile = data:GetCombatVisualProfile(entry.MonsterId)
+			local passed = unit ~= nil and isvalid(unit) and profile ~= nil
+			if passed then
+				local back = unit.Entity:GetChildByName("HealthBarBack")
+				local fill = unit.Entity:GetChildByName("HealthBarFill")
+				passed = unit.HasCombatVisualProfile
+					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.IdleRuid
+					and unit.Entity.SpriteRendererComponent.FlipX == (entry.Side == 1)
+					and isvalid(back) and isvalid(fill)
+				unit:RefreshLocomotionVisual(100, true, 1)
+				passed = passed and unit.VisualState == "Move"
+					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.MoveRuid
+				unit:PlayAttackVisual(120, 1)
+				passed = passed and unit.VisualState == "Attack"
+					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.AttackRuid
+				unit:PlayHitVisual(140, 1)
+				passed = passed and unit.VisualState == "Hit"
+					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.HitRuid
+				unit:PlayNexusFinalVisual(160, 1)
+				passed = passed and unit.VisualState == "Nexus"
+					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.NexusRuid
+				unit:PlayDeathVisual(180, 1)
+				passed = passed and unit.VisualState == "Die"
+					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.DieRuid
+					and back.Enable == false and fill.Enable == false
+				unit.HP = unit.MaxHP
+				unit:ResetCombatState()
+				passed = passed and unit.VisualState == "Idle"
+					and back.Enable == true and fill.Enable == true
+					and math.abs(fill.TransformComponent.Scale.x - unit.HealthBarWidthScale) <= 0.0001
+			end
+			allPassed = self:RecordPhase2C5Regression(
+				"Visual8_" .. entry.MonsterId,
+				passed
+			) and allPassed
+		end
+
+		combat:SetSimulationSpeed(2)
+		for _, entry in ipairs(entries) do
+			local unit = self:FindActiveUnitByInstanceId("C5_VIS8_" .. entry.MonsterId)
+			allPassed = unit ~= nil and isvalid(unit)
+				and unit.VisualPlaybackSpeed == 2
+				and unit.Entity.SpriteRendererComponent.PlayRate == 2
+				and allPassed
+		end
+		combat:SetSimulationSpeed(1)
+		for _, entry in ipairs(entries) do
+			local unit = self:FindActiveUnitByInstanceId("C5_VIS8_" .. entry.MonsterId)
+			allPassed = unit ~= nil and isvalid(unit)
+				and unit.VisualPlaybackSpeed == 1
+				and unit.Entity.SpriteRendererComponent.PlayRate == 1
+				and allPassed
+		end
+		return self:RecordPhase2C5Regression("Visual8SpeedRate", allPassed)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2C5Tests()
+		local combat = self:GetCombat()
+		if not isvalid(combat) then
+			log_error("[Phase2C5][TEST][ALL] FAIL - combat missing")
+			return false
+		end
+		local savedOwnerUserId = self.PlayerOwnerUserId
+		local allPassed = true
+		local scenarios = {
+			"OneCandidate", "MultipleCandidates", "NoCandidate",
+			"BlockedDestination", "TargetUndo", "SelectedReveal"
+		}
+		for _, scenarioName in ipairs(scenarios) do
+			allPassed = self:RecordPhase2C5Regression(
+				"Ribbon" .. scenarioName,
+				self:RunPhase2C5RibbonScenario(scenarioName)
+			) and allPassed
+		end
+		allPassed = self:RecordPhase2C5Regression(
+			"PresentationVerticalSlice",
+			self:RunPhase2C5PresentationRegression()
+		) and allPassed
+		allPassed = self:RecordPhase2C5Regression(
+			"PresentationExpandedEight",
+			self:RunPhase2C5ExpandedPresentationRegression()
+		) and allPassed
+		self:KillActiveUnits()
+		combat:ResetSimulation(false)
+		combat.MakerHarnessRunning = false
+		self.PlayerOwnerUserId = savedOwnerUserId
+		self.UseFixedMatchSeed = false
+		self.AutoConfirmRerollWithoutUI = false
+		self:ResetBattle()
+		if allPassed then
+			log("[Phase2C5][TEST][ALL] PASS - normal play state restored")
+		else
+			log_error("[Phase2C5][TEST][ALL] FAIL - see scenario logs")
 		end
 		return allPassed
 	end

@@ -134,6 +134,34 @@ script ThreeLaneHUD extends Component
 
 	property boolean PrivateSnapshotRequested = false
 
+	property string LastHudStateSignature = ""
+
+	property string LastTimerText = ""
+
+	property string LastMulliganSignature = ""
+
+	property table CardVisualSignatureBySlot = {}
+
+	property table PermanentVisualSignatureBySlot = {}
+
+	property table ImageRuidByEntityId = {}
+
+	property integer HudDataRefreshCount = 0
+
+	property integer DynamicTimerRefreshCount = 0
+
+	property integer CardMutationCount = 0
+
+	property integer PermanentMutationCount = 0
+
+	property string RibbonSelectionSourceId = ""
+
+	property string RibbonSelectionState = "Idle"
+
+	property table RibbonCandidateBySlot = {}
+
+	property table RibbonDestinationBySlot = {}
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- 동적 4B UI는 경로로 찾고 기존 2A 조작 엔티티는 기존 바인딩을 유지한다.
@@ -143,6 +171,20 @@ script ThreeLaneHUD extends Component
 		self.InstalledCards = {}
 		self.MulliganCardEntities = {}
 		self.PermanentMarkerEntities = {}
+		self.LastHudStateSignature = ""
+		self.LastTimerText = ""
+		self.LastMulliganSignature = ""
+		self.CardVisualSignatureBySlot = {}
+		self.PermanentVisualSignatureBySlot = {}
+		self.ImageRuidByEntityId = {}
+		self.HudDataRefreshCount = 0
+		self.DynamicTimerRefreshCount = 0
+		self.CardMutationCount = 0
+		self.PermanentMutationCount = 0
+		self.RibbonSelectionSourceId = ""
+		self.RibbonSelectionState = "Idle"
+		self.RibbonCandidateBySlot = {}
+		self.RibbonDestinationBySlot = {}
 
 		self.MulliganOverlay = self:GetHudEntity("MulliganOverlay")
 		self.MulliganReplaceButton = self:GetHudEntity("MulliganOverlay/Window/ReplaceButton")
@@ -280,7 +322,14 @@ script ThreeLaneHUD extends Component
 		self.RefreshAccumulator = self.RefreshAccumulator + delta
 		if self.RefreshAccumulator >= 0.1 then
 			self.RefreshAccumulator = 0
-			self:RefreshHud()
+			local board = self:GetBoard()
+			if board ~= nil then
+				self:RefreshDynamicTimer(board)
+				local signature = self:BuildHudStateSignature(board)
+				if signature ~= self.LastHudStateSignature then
+					self:RefreshHud()
+				end
+			end
 		end
 	end
 
@@ -402,6 +451,105 @@ script ThreeLaneHUD extends Component
 	end
 
 	@ExecSpace("ClientOnly")
+	method string BuildPrivateVisualSignature()
+		local parts = {}
+		for _, record in ipairs(self.HandCards) do
+			table.insert(
+				parts,
+				record.InstanceId
+					.. ":" .. record.State
+					.. ":" .. tostring(record.ReservedSlotIndex)
+					.. ":" .. record.ImageRuid
+			)
+		end
+		table.insert(parts, "#")
+		for _, record in ipairs(self.InstalledCards) do
+			table.insert(
+				parts,
+				record.InstanceId
+					.. ":" .. tostring(record.PermanentSlotIndex)
+					.. ":" .. record.VisualState
+					.. ":" .. record.ImageRuid
+			)
+		end
+		return table.concat(parts, ",")
+	end
+
+	@ExecSpace("ClientOnly")
+	method string BuildHudStateSignature(ThreeLaneBoard board)
+		if board == nil then
+			return ""
+		end
+		return board.BattleState
+			.. "|" .. board.Phase
+			.. "|" .. tostring(board.TurnNumber)
+			.. "|" .. tostring(board.CurrentCost)
+			.. "|" .. tostring(board.MaxCost)
+			.. "|" .. tostring(board.PendingCount)
+			.. "|" .. tostring(board.PlayerNexusHp)
+			.. "|" .. tostring(board.EnemyNexusHp)
+			.. "|" .. tostring(board.PlayerHandCount)
+			.. "|" .. tostring(board.PlayerDeckCount)
+			.. "|" .. tostring(board.PlayerInstalledCount)
+			.. "|" .. tostring(board.PlayerBurnedCount)
+			.. "|" .. tostring(board.EnemyHandCount)
+			.. "|" .. tostring(board.EnemyDeckCount)
+			.. "|" .. tostring(board.EnemyInstalledCount)
+			.. "|" .. tostring(board.EnemyBurnedCount)
+			.. "|" .. tostring(board.SimSpeed)
+			.. "|" .. tostring(self.MulliganConfirmedLocally)
+			.. "|" .. self.SelectedCardInstanceId
+			.. "|" .. tostring(self.SelectedReservedSlot)
+			.. "|" .. self:BuildPrivateVisualSignature()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetEntityEnable(Entity entity, boolean enabled)
+		if isvalid(entity) and entity.Enable ~= enabled then
+			entity.Enable = enabled
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetImageIfChanged(Entity entity, string ruid)
+		if not isvalid(entity) or not isvalid(entity.SpriteGUIRendererComponent) then
+			return
+		end
+		local key = entity.Id
+		if self.ImageRuidByEntityId[key] == ruid then
+			return
+		end
+		entity.SpriteGUIRendererComponent.ImageRUID = DataRef(ruid)
+		self.ImageRuidByEntityId[key] = ruid
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshDynamicTimer(ThreeLaneBoard board)
+		if board == nil or not isvalid(self.TimerText) then
+			return
+		end
+		local value = "전투 대기"
+		if board.BattleState ~= "Playing" then
+			value = "전투 종료"
+		elseif board.Phase == "Mulligan" then
+			value = "첫 패 선택 · 시간 제한 없음"
+		elseif board.Phase == "Battle" then
+			value = "전투 시간  " .. tostring(math.ceil(board.BattleRemaining)) .. "초"
+		end
+		if self.LastTimerText ~= value then
+			self.TimerText.Text = value
+			self.LastTimerText = value
+			self.DynamicTimerRefreshCount = self.DynamicTimerRefreshCount + 1
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RequestVisualRefresh()
+		self.LastHudStateSignature = ""
+		self:RefreshHud()
+	end
+
+	@ExecSpace("ClientOnly")
 	method void ReceivePrivateCardState(string payload, string eventType, string eventRecord)
 		-- 서버가 소유자에게만 보낸 손패·예약·영구 설치 스냅샷을 교체한다.
 		local separator = string.find(payload, "#", 1, true)
@@ -443,6 +591,10 @@ script ThreeLaneHUD extends Component
 			self.MulliganConfirmedLocally = false
 			self.SelectedCardInstanceId = ""
 			self.SelectedVisualSlot = 0
+			self.RibbonSelectionSourceId = ""
+			self.RibbonSelectionState = "Idle"
+			self.RibbonCandidateBySlot = {}
+			self.RibbonDestinationBySlot = {}
 		elseif eventType == "MulliganRejected" then
 			self.MulliganConfirmedLocally = false
 			self:SetCardHint("리롤 요청이 거부되었습니다. 현재 첫 패를 다시 확인해 주세요.")
@@ -460,12 +612,70 @@ script ThreeLaneHUD extends Component
 			self:SetCardHint("배치가 영구 설치되었습니다. 전투 후에도 슬롯을 유지합니다.")
 		end
 
+		self.LastHudStateSignature = ""
 		self:RefreshHud()
 		log(
 			"[Phase2C4B][Private] Event=" .. eventType
 			.. ", Hand=" .. tostring(#self.HandCards)
 			.. ", Installed=" .. tostring(#self.InstalledCards)
 		)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ReceiveRibbonEffectSelection(string sourceInstanceId, string state, string payload)
+		self.RibbonSelectionSourceId = sourceInstanceId or ""
+		self.RibbonSelectionState = state or "Idle"
+		self.RibbonCandidateBySlot = {}
+		self.RibbonDestinationBySlot = {}
+		if payload ~= nil and payload ~= "" then
+			for recordText in string.gmatch(payload, "[^,]+") do
+				local fields = {}
+				for field in string.gmatch(recordText, "[^:]+") do
+					table.insert(fields, field)
+				end
+				local targetSlot = tonumber(fields[2]) or 0
+				local destinationSlot = tonumber(fields[3]) or 0
+				if targetSlot > 0 then
+					self.RibbonCandidateBySlot[targetSlot] = fields[1]
+				end
+				if destinationSlot > 0 then
+					self.RibbonDestinationBySlot[destinationSlot] = true
+				end
+			end
+		end
+		if self.RibbonSelectionState == "Selecting" then
+			self:SetCardHint("아래 라인으로 이동할 아군을 선택하세요. 초록색 슬롯만 선택할 수 있습니다.")
+		elseif self.RibbonSelectionState == "Selected" then
+			self:SetCardHint("리본돼지 이동 대상과 목적지를 예약했습니다. 배치 확정 전까지 되돌릴 수 있습니다.")
+		elseif self.RibbonSelectionState == "NoTarget" then
+			self:SetCardHint("이동 가능한 앞순번 아군이 없어 리본돼지를 효과 없이 예약했습니다.")
+		end
+		self.PermanentVisualSignatureBySlot = {}
+		self:RequestVisualRefresh()
+		log(
+			"[Phase2C5][RibbonManual][HUD] State="
+			.. self.RibbonSelectionState
+			.. ", Source=" .. self.RibbonSelectionSourceId
+		)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean HandleRibbonTargetSlotInput(integer slotIndex)
+		if self.RibbonSelectionState ~= "Selecting" then
+			return false
+		end
+		local targetInstanceId = self.RibbonCandidateBySlot[slotIndex]
+		if targetInstanceId == nil or targetInstanceId == "" then
+			self:SetCardHint("이 슬롯은 리본돼지 효과의 유효 대상이 아닙니다. 초록색 슬롯을 선택하세요.")
+			return true
+		end
+		local board = self:GetBoard()
+		if board == nil then
+			return true
+		end
+		board:RequestSelectRibbonEffectTarget(self.RibbonSelectionSourceId, targetInstanceId)
+		self:SetCardHint("리본돼지 이동 대상의 서버 검증을 기다리는 중입니다.")
+		return true
 	end
 
 	@ExecSpace("ClientOnly")
@@ -485,17 +695,7 @@ script ThreeLaneHUD extends Component
 		if isvalid(self.PhaseText) then
 			self.PhaseText.Text = self:GetPhaseLabel(board)
 		end
-		if isvalid(self.TimerText) then
-			if board.BattleState ~= "Playing" then
-				self.TimerText.Text = "전투 종료"
-			elseif board.Phase == "Mulligan" then
-				self.TimerText.Text = "첫 패 선택 · 시간 제한 없음"
-			elseif board.Phase == "Battle" then
-				self.TimerText.Text = "전투 시간  " .. tostring(math.ceil(board.BattleRemaining)) .. "초"
-			else
-				self.TimerText.Text = "전투 대기"
-			end
-		end
+		self:RefreshDynamicTimer(board)
 		if isvalid(self.PlayerHpText) then
 			self.PlayerHpText.Text = tostring(board.PlayerNexusHp)
 		end
@@ -524,11 +724,15 @@ script ThreeLaneHUD extends Component
 		self:RefreshCardVisuals(board)
 		self:RefreshMulliganVisual(board)
 		self:RefreshPermanentSlots()
+		self.LastHudStateSignature = self:BuildHudStateSignature(board)
+		self.HudDataRefreshCount = self.HudDataRefreshCount + 1
 	end
 
 	@ExecSpace("ClientOnly")
 	method void SetEntityText(Entity entity, string value)
-		if isvalid(entity) and isvalid(entity.TextGUIRendererComponent) then
+		if isvalid(entity)
+			and isvalid(entity.TextGUIRendererComponent)
+			and entity.TextGUIRendererComponent.Text ~= value then
 			entity.TextGUIRendererComponent.Text = value
 		end
 	end
@@ -565,14 +769,12 @@ script ThreeLaneHUD extends Component
 			return
 		end
 		if record == nil then
-			cardEntity.Enable = false
+			self:SetEntityEnable(cardEntity, false)
 			return
 		end
-		cardEntity.Enable = true
+		self:SetEntityEnable(cardEntity, true)
 		local portrait = cardEntity:GetChildByName("Portrait")
-		if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
-			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
-		end
+		self:SetImageIfChanged(portrait, record.ImageRuid)
 		self:SetEntityText(cardEntity:GetChildByName("Name"), record.DevName)
 		self:SetEntityText(cardEntity:GetChildByName("Cost"), tostring(record.Cost))
 		local rangeLabel = "근접"
@@ -588,12 +790,7 @@ script ThreeLaneHUD extends Component
 
 	@ExecSpace("ClientOnly")
 	method void RefreshCardVisuals(ThreeLaneBoard board)
-		self.VisualRecordBySlot = {}
-		for _, cardEntity in ipairs(self.CardEntities) do
-			if isvalid(cardEntity) then
-				cardEntity.Enable = false
-			end
-		end
+		local nextVisualRecordBySlot = {}
 		local count = #self.HandCards
 		if count > 7 then
 			count = 7
@@ -602,11 +799,31 @@ script ThreeLaneHUD extends Component
 		local placementOpen = board.BattleState == "Playing" and board.Phase == "Placement"
 		for index = 1, count do
 			local visualSlot = startSlot + index - 1
-			local record = self.HandCards[index]
+			nextVisualRecordBySlot[visualSlot] = self.HandCards[index]
+		end
+		for visualSlot = 1, 7 do
+			local record = nextVisualRecordBySlot[visualSlot]
 			local cardEntity = self.CardEntities[visualSlot]
-			self.VisualRecordBySlot[visualSlot] = record
-			self:SetCardEntityData(cardEntity, record)
-			if isvalid(cardEntity) and isvalid(cardEntity.SpriteGUIRendererComponent) then
+			local signature = "Empty"
+			if record ~= nil then
+				signature = record.InstanceId
+					.. "|" .. record.State
+					.. "|" .. record.ImageRuid
+					.. "|" .. tostring(record.Cost)
+					.. "|" .. tostring(placementOpen)
+					.. "|" .. tostring(board.CurrentCost)
+					.. "|" .. tostring(self.SelectedCardInstanceId == record.InstanceId)
+			end
+			local changed = self.CardVisualSignatureBySlot[visualSlot] ~= signature
+			if changed then
+				self.CardVisualSignatureBySlot[visualSlot] = signature
+				self.CardMutationCount = self.CardMutationCount + 1
+				self:SetCardEntityData(cardEntity, record)
+			end
+			if record ~= nil
+				and changed
+				and isvalid(cardEntity)
+				and isvalid(cardEntity.SpriteGUIRendererComponent) then
 				if record.State == "Reserved" then
 					cardEntity.SpriteGUIRendererComponent.Color = Color(0.36, 0.42, 0.50, 0.88)
 				elseif not placementOpen then
@@ -628,6 +845,7 @@ script ThreeLaneHUD extends Component
 				end
 			end
 		end
+		self.VisualRecordBySlot = nextVisualRecordBySlot
 	end
 
 	@ExecSpace("ClientOnly")
@@ -636,7 +854,21 @@ script ThreeLaneHUD extends Component
 			return
 		end
 		local visible = board.BattleState == "Playing" and board.Phase == "Mulligan"
-		self.MulliganOverlay.Enable = visible
+		local parts = { tostring(visible), tostring(self.MulliganConfirmedLocally) }
+		for index = 1, 4 do
+			local record = self.HandCards[index]
+			if record == nil then
+				table.insert(parts, "Empty")
+			else
+				table.insert(parts, record.InstanceId .. ":" .. record.State .. ":" .. record.ImageRuid)
+			end
+		end
+		local signature = table.concat(parts, "|")
+		if signature == self.LastMulliganSignature then
+			return
+		end
+		self.LastMulliganSignature = signature
+		self:SetEntityEnable(self.MulliganOverlay, visible)
 		if not visible then
 			return
 		end
@@ -689,6 +921,7 @@ script ThreeLaneHUD extends Component
 			return
 		end
 		self.MulliganConfirmedLocally = true
+		self:RequestVisualRefresh()
 		board:RequestConfirmMulligan(choice)
 		if choice == "ReplaceAll" then
 			self:SetCardHint("첫 패 4장 전부 교체를 요청했습니다. 서버 결과를 기다리는 중입니다.")
@@ -705,6 +938,10 @@ script ThreeLaneHUD extends Component
 		end
 		local board = self:GetBoard()
 		if board == nil then
+			return false
+		end
+		if self.RibbonSelectionState == "Selecting" then
+			self:SetCardHint("리본돼지의 이동 대상을 먼저 선택하세요.")
 			return false
 		end
 		if board.BattleState ~= "Playing" then
@@ -852,6 +1089,7 @@ script ThreeLaneHUD extends Component
 			self.SelectedCardInstanceId = ""
 			self.SelectedVisualSlot = 0
 			self:SetCardHint("선택을 취소했습니다.")
+			self:RequestVisualRefresh()
 			return
 		end
 		if not self:CanPickVisualCard(visualSlot) then
@@ -861,6 +1099,7 @@ script ThreeLaneHUD extends Component
 		self.SelectedCardInstanceId = record.InstanceId
 		self.SelectedVisualSlot = visualSlot
 		self:SetCardHint(record.DevName .. " 선택 (코스트 " .. tostring(record.Cost) .. ") · 빈 슬롯을 터치하세요.")
+		self:RequestVisualRefresh()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -909,6 +1148,7 @@ script ThreeLaneHUD extends Component
 		self.SelectedCardInstanceId = ""
 		self.SelectedVisualSlot = 0
 		self:SetCardHint("배치 예약: " .. record.DevName .. " → 슬롯 " .. tostring(slot.SlotIndex) .. " · 확정 전 되돌리기 가능")
+		self:RequestVisualRefresh()
 		log("[Phase2C4B][Placement] Source=" .. inputSource .. ", Instance=" .. record.InstanceId .. ", Slot=" .. tostring(slot.SlotIndex))
 		return true
 	end
@@ -1016,6 +1256,7 @@ script ThreeLaneHUD extends Component
 			slotEntity.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.20, 1.0)
 		end
 		self:SetCardHint("예약 선택: 슬롯 " .. tostring(slot.SlotIndex) .. " · 취소 버튼으로 정확한 카드 복사본을 회수합니다.")
+		self:RequestVisualRefresh()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1050,59 +1291,83 @@ script ThreeLaneHUD extends Component
 
 	@ExecSpace("ClientOnly")
 	method void RefreshPermanentSlots()
-		for index = 1, 15 do
-			local slotEntity = self:GetSlotEntity(index)
-			if isvalid(slotEntity) then
-				---@type ThreeLaneSlot
-				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
-				if isvalid(slot) then
-					slot.OccupancyState = "Empty"
-				end
-			end
-			local marker = self.PermanentMarkerEntities[index]
-			if isvalid(marker) then
-				marker.Enable = false
-			end
-		end
-
+		local installedBySlot = {}
+		local reservedBySlot = {}
 		for _, record in ipairs(self.InstalledCards) do
-			local slotIndex = record.PermanentSlotIndex
-			local slotEntity = self:GetSlotEntity(slotIndex)
-			if isvalid(slotEntity) then
-				---@type ThreeLaneSlot
-				local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
-				if isvalid(slot) then
-					slot.IsOccupied = true
-					slot.OccupancyState = "Permanent"
-				end
-			end
-			local marker = self.PermanentMarkerEntities[slotIndex]
-			if isvalid(marker) and isvalid(slotEntity) then
-				marker.Enable = true
-				local portrait = marker:GetChildByName("Portrait")
-				if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
-					portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
-				end
-				local deadShade = marker:GetChildByName("DeadShade")
-				if isvalid(deadShade) then
-					deadShade.Enable = record.VisualState == "Dead"
-				end
-				local worldPosition = slotEntity.TransformComponent.WorldPosition
-				local screenPosition = _UILogic:WorldToScreenPosition(Vector2(worldPosition.x, worldPosition.y))
-				marker.UITransformComponent.anchoredPosition = _UILogic:ScreenToUIPosition(screenPosition)
-			end
+			installedBySlot[record.PermanentSlotIndex] = record
 		end
-
 		for _, record in ipairs(self.HandCards) do
 			if record.State == "Reserved" and record.ReservedSlotIndex > 0 then
-				local slotEntity = self:GetSlotEntity(record.ReservedSlotIndex)
+				reservedBySlot[record.ReservedSlotIndex] = record
+			end
+		end
+
+		for slotIndex = 1, 15 do
+			local installed = installedBySlot[slotIndex]
+			local reserved = reservedBySlot[slotIndex]
+			local candidateId = self.RibbonCandidateBySlot[slotIndex] or ""
+			local destination = self.RibbonDestinationBySlot[slotIndex] == true
+			local occupancy = "Empty"
+			local instanceId = ""
+			local imageRuid = ""
+			local visualState = ""
+			if installed ~= nil then
+				occupancy = "Permanent"
+				instanceId = installed.InstanceId
+				imageRuid = installed.ImageRuid
+				visualState = installed.VisualState
+			elseif reserved ~= nil then
+				occupancy = "Reserved"
+				instanceId = reserved.InstanceId
+				imageRuid = reserved.ImageRuid
+			elseif destination then
+				occupancy = "EffectDestination"
+			end
+			local signature = occupancy
+				.. "|" .. instanceId
+				.. "|" .. imageRuid
+				.. "|" .. visualState
+				.. "|" .. candidateId
+				.. "|" .. tostring(destination)
+				.. "|" .. tostring(self.SelectedReservedSlot == slotIndex)
+			if self.PermanentVisualSignatureBySlot[slotIndex] ~= signature then
+				self.PermanentVisualSignatureBySlot[slotIndex] = signature
+				self.PermanentMutationCount = self.PermanentMutationCount + 1
+				local slotEntity = self:GetSlotEntity(slotIndex)
+				local marker = self.PermanentMarkerEntities[slotIndex]
 				if isvalid(slotEntity) then
 					---@type ThreeLaneSlot
 					local slot = slotEntity:GetComponent("script.ThreeLaneSlot")
 					if isvalid(slot) then
-						slot.IsOccupied = true
-						slot.OccupancyState = "Reserved"
+						slot.IsOccupied = occupancy ~= "Empty"
+						slot.OccupancyState = occupancy
 					end
+					if isvalid(slotEntity.SpriteRendererComponent) then
+						if candidateId ~= "" then
+							slotEntity.SpriteRendererComponent.Color = Color(0.28, 1.0, 0.48, 1.0)
+						elseif destination then
+							slotEntity.SpriteRendererComponent.Color = Color(0.72, 0.38, 1.0, 0.95)
+						elseif occupancy == "Permanent" then
+							slotEntity.SpriteRendererComponent.Color = Color(0.30, 0.38, 0.55, 0.75)
+						elseif occupancy == "Reserved" and self.SelectedReservedSlot == slotIndex then
+							slotEntity.SpriteRendererComponent.Color = Color(1.0, 0.45, 0.20, 1.0)
+						elseif occupancy == "Reserved" then
+							slotEntity.SpriteRendererComponent.Color = Color(0.25, 0.25, 0.25, 0.6)
+						else
+							slotEntity.SpriteRendererComponent.Color = Color(0.25, 0.65, 1.0, 0.85)
+						end
+					end
+				end
+				if installed == nil then
+					self:SetEntityEnable(marker, false)
+				elseif isvalid(marker) and isvalid(slotEntity) then
+					self:SetEntityEnable(marker, true)
+					self:SetImageIfChanged(marker:GetChildByName("Portrait"), installed.ImageRuid)
+					local deadShade = marker:GetChildByName("DeadShade")
+					self:SetEntityEnable(deadShade, installed.VisualState == "Dead")
+					local worldPosition = slotEntity.TransformComponent.WorldPosition
+					local screenPosition = _UILogic:WorldToScreenPosition(Vector2(worldPosition.x, worldPosition.y))
+					marker.UITransformComponent.anchoredPosition = _UILogic:ScreenToUIPosition(screenPosition)
 				end
 			end
 		end
@@ -1207,7 +1472,9 @@ script ThreeLaneHUD extends Component
 		if not isvalid(self.ConfirmButton) then
 			return
 		end
-		local usable = board.BattleState == "Playing" and board.Phase == "Placement"
+		local usable = board.BattleState == "Playing"
+			and board.Phase == "Placement"
+			and self.RibbonSelectionState ~= "Selecting"
 		if isvalid(self.ConfirmButton.ButtonComponent) then
 			self.ConfirmButton.ButtonComponent.Enable = usable
 		end
@@ -1277,6 +1544,10 @@ script ThreeLaneHUD extends Component
 		local board = self:GetBoard()
 		if board == nil or board.BattleState ~= "Playing" or board.Phase ~= "Placement" then
 			self:SetCardHint("첫 패 선택이 끝난 배치 단계에서만 확정할 수 있습니다.")
+			return
+		end
+		if self.RibbonSelectionState == "Selecting" then
+			self:SetCardHint("리본돼지의 이동 대상을 먼저 선택해야 배치를 확정할 수 있습니다.")
 			return
 		end
 		self.SelectedCardInstanceId = ""

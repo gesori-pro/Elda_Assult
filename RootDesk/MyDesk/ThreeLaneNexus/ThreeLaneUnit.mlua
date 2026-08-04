@@ -49,6 +49,38 @@ script ThreeLaneUnit extends Component
 
 	property number SecondaryDamageRate = 0
 
+	property string RevealEffectTargetInstanceId = ""
+
+	property integer RevealEffectDestinationSlotIndex = 0
+
+	property boolean RevealEffectResolved = false
+
+	property boolean HasCombatVisualProfile = false
+
+	property string VisualPackId = ""
+
+	property string IdleRuid = ""
+
+	property string MoveRuid = ""
+
+	property string AttackRuid = ""
+
+	property string HitRuid = ""
+
+	property string DieRuid = ""
+
+	property string NexusRuid = ""
+
+	property string VisualState = "Prototype"
+
+	property integer VisualStateUntilTick = 0
+
+	property number VisualPlaybackSpeed = 1
+
+	property number HealthBarYOffset = 0.72
+
+	property number HealthBarWidthScale = 3.5
+
 	property number SimX = 0
 
 	property number CombatStartX = 0
@@ -112,6 +144,12 @@ script ThreeLaneUnit extends Component
 		self.SecondaryTargetHistory = {}
 		self.DamageIntentHistory = {}
 		self:SetVisualVelocity(0)
+		self.VisualStateUntilTick = 0
+		if self.HasCombatVisualProfile then
+			self:SetCombatVisualState("Idle", 0, 0, self.VisualPlaybackSpeed, true)
+			self:SetHealthBarVisible(true)
+			self:UpdateHealthBarVisual()
+		end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -120,6 +158,169 @@ script ThreeLaneUnit extends Component
 		if isvalid(self.Entity.KinematicbodyComponent) then
 			self.Entity.KinematicbodyComponent.MoveVelocity = Vector2(signedSpeed, 0)
 		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void InitializePresentation(any profile, number speed)
+		if profile == nil then
+			self.HasCombatVisualProfile = false
+			self.VisualState = "Prototype"
+			self:SetHealthBarVisible(false)
+			return
+		end
+		self.HasCombatVisualProfile = true
+		self.VisualPackId = profile.PackId or ""
+		self.IdleRuid = profile.IdleRuid or ""
+		self.MoveRuid = profile.MoveRuid or self.IdleRuid
+		self.AttackRuid = profile.AttackRuid or self.IdleRuid
+		self.HitRuid = profile.HitRuid or self.IdleRuid
+		self.DieRuid = profile.DieRuid or self.IdleRuid
+		self.NexusRuid = profile.NexusRuid or self.AttackRuid
+		self.HealthBarYOffset = profile.HealthBarYOffset or 0.72
+		self.HealthBarWidthScale = profile.HealthBarWidthScale or 3.5
+		self.VisualPlaybackSpeed = speed == 2 and 2 or 1
+		if isvalid(self.Entity.SpriteRendererComponent) then
+			self.Entity.SpriteRendererComponent.Color = Color(1.0, 1.0, 1.0, 1.0)
+			self.Entity.SpriteRendererComponent.FlipX = self.OwnerSide == 1
+			self.Entity.SpriteRendererComponent.PlayRate = self.VisualPlaybackSpeed
+		end
+		self:ConfigureHealthBarTransform()
+		self:SetHealthBarVisible(true)
+		self:UpdateHealthBarVisual()
+		self:SetCombatVisualState("Idle", 0, 0, self.VisualPlaybackSpeed, true)
+		log(
+			"[Phase2C5][Visual] Profile Monster=" .. self.MonsterId
+			.. ", Pack=" .. self.VisualPackId
+			.. ", Side=" .. tostring(self.OwnerSide)
+			.. ", FlipX=" .. tostring(self.OwnerSide == 1)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetVisualRuid(string state)
+		if state == "Move" then return self.MoveRuid end
+		if state == "Attack" then return self.AttackRuid end
+		if state == "Hit" then return self.HitRuid end
+		if state == "Die" then return self.DieRuid end
+		if state == "Nexus" then return self.NexusRuid end
+		return self.IdleRuid
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetCombatVisualState(
+		string state,
+		integer simTick,
+		integer untilTick,
+		number speed,
+		boolean force
+	)
+		if not self.HasCombatVisualProfile or not isvalid(self.Entity.SpriteRendererComponent) then
+			return
+		end
+		self:SetVisualPlaybackSpeed(speed)
+		if not force
+			and simTick < self.VisualStateUntilTick
+			and (self.VisualState == "Attack" or self.VisualState == "Hit") then
+			return
+		end
+		local ruid = self:GetVisualRuid(state)
+		if ruid == nil or ruid == "" then
+			return
+		end
+		if self.VisualState ~= state or force then
+			self.VisualState = state
+			self.Entity.SpriteRendererComponent.SpriteRUID = ruid
+		end
+		self.VisualStateUntilTick = untilTick
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetVisualPlaybackSpeed(number speed)
+		local normalized = 1
+		if speed == 2 then normalized = 2 end
+		if self.VisualPlaybackSpeed == normalized then
+			return
+		end
+		self.VisualPlaybackSpeed = normalized
+		if isvalid(self.Entity.SpriteRendererComponent) then
+			self.Entity.SpriteRendererComponent.PlayRate = normalized
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshLocomotionVisual(integer simTick, boolean moving, number speed)
+		if moving then
+			self:SetCombatVisualState("Move", simTick, 0, speed, false)
+		else
+			self:SetCombatVisualState("Idle", simTick, 0, speed, false)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayAttackVisual(integer simTick, number speed)
+		self:SetCombatVisualState("Attack", simTick, simTick + 12, speed, true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayHitVisual(integer simTick, number speed)
+		self:SetCombatVisualState("Hit", simTick, simTick + 8, speed, true)
+		self:UpdateHealthBarVisual()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayDeathVisual(integer simTick, number speed)
+		self:SetVisualVelocity(0)
+		self:SetHealthBarVisible(false)
+		self:SetCombatVisualState("Die", simTick, simTick + 30, speed, true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayNexusFinalVisual(integer simTick, number speed)
+		self:SetVisualVelocity(0)
+		self:SetHealthBarVisible(false)
+		self:SetCombatVisualState("Nexus", simTick, simTick + 24, speed, true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ConfigureHealthBarTransform()
+		local back = self.Entity:GetChildByName("HealthBarBack")
+		local fill = self.Entity:GetChildByName("HealthBarFill")
+		if isvalid(back) then
+			back.TransformComponent.Position = Vector3(0, self.HealthBarYOffset, 0)
+			back.TransformComponent.Scale = Vector3(self.HealthBarWidthScale, 1, 1)
+		end
+		if isvalid(fill) then
+			fill.TransformComponent.Position = Vector3(0, self.HealthBarYOffset, 0)
+			fill.TransformComponent.Scale = Vector3(self.HealthBarWidthScale, 1, 1)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateHealthBarVisual()
+		if not self.HasCombatVisualProfile or self.MaxHP <= 0 then
+			return
+		end
+		local fill = self.Entity:GetChildByName("HealthBarFill")
+		if not isvalid(fill) then
+			return
+		end
+		local ratio = self.HP / self.MaxHP
+		if ratio < 0 then ratio = 0 end
+		if ratio > 1 then ratio = 1 end
+		fill.TransformComponent.Scale = Vector3(self.HealthBarWidthScale * ratio, 1, 1)
+		fill.TransformComponent.Position = Vector3(
+			-0.08 * self.HealthBarWidthScale * (1 - ratio),
+			self.HealthBarYOffset,
+			0
+		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetHealthBarVisible(boolean visible)
+		local back = self.Entity:GetChildByName("HealthBarBack")
+		local fill = self.Entity:GetChildByName("HealthBarFill")
+		if isvalid(back) then back.Enable = visible and self.HasCombatVisualProfile end
+		if isvalid(fill) then fill.Enable = visible and self.HasCombatVisualProfile end
 	end
 
 end

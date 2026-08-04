@@ -467,6 +467,102 @@ script ThreeLaneData extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method any GetCombatVisualProfile(string monsterId)
+		-- Phase 2C-5 세로 슬라이스 통과 후 기본 8종 모두 실제 Resource Pack animationclip을 사용한다.
+		local profiles = {
+			slime = {
+				PackId = "mob/0210100.img",
+				IdleRuid = "50faf654ee5d479cb2958edce9feaef0",
+				MoveRuid = "dc932872543f4a02bf41e977ab79e5ad",
+				AttackRuid = "8b89d86b1a9c4c4288650614c6f30e67",
+				HitRuid = "61c27025a8f14c478f30ede1b49758bc",
+				DieRuid = "31ecb6c7cbc24599881f00cb01599f09",
+				NexusRuid = "8b89d86b1a9c4c4288650614c6f30e67",
+				HealthBarYOffset = 0.72,
+				HealthBarWidthScale = 3.5
+			},
+			ribbon_pig = {
+				PackId = "mob/1210101.img",
+				IdleRuid = "6a699b8c31b94474bb795c7394c3af3b",
+				MoveRuid = "efd4d44e0da7496bac4c350def33a108",
+				AttackRuid = "a09f56642db6409b8a41bb97106425db",
+				HitRuid = "ee7bf6fc53fc48df82db872d8827310a",
+				DieRuid = "77f8f34df8cc4ba6ae188fd2f1b28bc4",
+				NexusRuid = "a09f56642db6409b8a41bb97106425db",
+				HealthBarYOffset = 0.72,
+				HealthBarWidthScale = 3.7
+			},
+			orange_mushroom = {
+				PackId = "mob/1210102.img",
+				IdleRuid = "a95cfed2c8fe4d2cb64cbb62db051f92",
+				MoveRuid = "8257566e41aa4234929e81c6c2dab2e4",
+				AttackRuid = "6df12df0c9ce4caea61385606a4d40d3",
+				HitRuid = "5ebbdaf503964f3e87de155d16650805",
+				DieRuid = "dddbe2f162184ec89add7440da56eb75",
+				NexusRuid = "6df12df0c9ce4caea61385606a4d40d3",
+				HealthBarYOffset = 0.72,
+				HealthBarWidthScale = 3.5
+			},
+			green_mushroom = {
+				PackId = "mob/1110100.img",
+				IdleRuid = "d19573d7348643e19146f82ca34c1fa3",
+				MoveRuid = "2348b2e6cd5e4b72bd2add699cd9b6a2",
+				AttackRuid = "f93037dbe8374913a7b84e72a5508d5d",
+				HitRuid = "505caf7bc60141fe920147c7a84de72e",
+				DieRuid = "d8dd7a162fd1415cb55efdd3edba2a7c",
+				NexusRuid = "f93037dbe8374913a7b84e72a5508d5d",
+				HealthBarYOffset = 0.68,
+				HealthBarWidthScale = 3.5
+			},
+			stone_golem = {
+				PackId = "mob/5130101.img",
+				IdleRuid = "23761b84fca14bbfa671436791e4e0bb",
+				MoveRuid = "736ecda03d4444dea5f9089c02c54eb2",
+				AttackRuid = "28e55e44b6e34646b37f2fafef14a093",
+				HitRuid = "9c7b36710c8542ac8aa2e93a43bee8fb",
+				DieRuid = "871de25edc28418c8fbfef5ea416f2d4",
+				NexusRuid = "28e55e44b6e34646b37f2fafef14a093",
+				HealthBarYOffset = 1.48,
+				HealthBarWidthScale = 6.0
+			},
+			yeti = {
+				PackId = "mob/6300000.img",
+				IdleRuid = "2fa39477afb34d8cb6412b7fe5085f42",
+				MoveRuid = "02dfd5686d7042768adcea2d24c184b4",
+				AttackRuid = "a9e503154e3e4ad5ab0e9e7742dd53ec",
+				HitRuid = "186789a04dd34be797ab716279f7fea7",
+				DieRuid = "5a328165fb9a4f47b3810c427b8edbd6",
+				NexusRuid = "48cac2541e4b419d9b21c5758ca5fd59",
+				HealthBarYOffset = 1.24,
+				HealthBarWidthScale = 5.5
+			},
+			junior_balrog = {
+				PackId = "mob/8130100.img",
+				IdleRuid = "4b3ad414c1184c02b5eb459b29ee8ece",
+				MoveRuid = "4f60f3e6658d439aa7aa35f23a155d9d",
+				AttackRuid = "45a54fc4b202417bab825bf820698d7e",
+				HitRuid = "47ef73f20aa245f9ad2cc12c8f4c11da",
+				DieRuid = "6489dfbcae58487fb64d9978065b282c",
+				NexusRuid = "670661a1a9e8434eb6888cceb6d617c9",
+				HealthBarYOffset = 1.50,
+				HealthBarWidthScale = 6.0
+			},
+			pink_bean = {
+				PackId = "mob/8820001.img",
+				IdleRuid = "827a1a3fa9994dcbbb2dc2c1b4970be8",
+				MoveRuid = "a3c5a7459c2e44609eafdeabd7477b49",
+				AttackRuid = "83a5707e46b646bd82ef7e060f51cf74",
+				HitRuid = "868b2eb0d84e48ac9e765f02121fb4f0",
+				DieRuid = "7f5f934d5ad24e739c27c08a8a73531a",
+				NexusRuid = "7a28827fd1e340169387e4f532b217e9",
+				HealthBarYOffset = 1.15,
+				HealthBarWidthScale = 4.8
+			}
+		}
+		return profiles[monsterId]
+	end
+
+	@ExecSpace("ServerOnly")
 	method boolean ValidateDrakeReference()
 		-- 드레이크 실제 수치와 다섯 표시 등급이 모두 GDD 기준값 보통 3인지 검증한다.
 		local drake = self.MonsterById["drake"]
