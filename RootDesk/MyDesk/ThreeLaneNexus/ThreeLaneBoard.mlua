@@ -510,6 +510,15 @@ script ThreeLaneBoard extends Component
 		if monster == nil or not isvalid(data) then
 			return ""
 		end
+		local visualProfile = data:GetCombatVisualProfile(monster.MonsterId)
+		local portraitScale = 1
+		local portraitOffsetX = 0
+		local portraitOffsetY = 0
+		if visualProfile ~= nil then
+			portraitScale = visualProfile.PortraitScale or 1
+			portraitOffsetX = visualProfile.PortraitOffsetX or 0
+			portraitOffsetY = visualProfile.PortraitOffsetY or 0
+		end
 		return instance.InstanceId
 			.. "|" .. monster.MonsterId
 			.. "|" .. tostring(monster.CardIndex)
@@ -526,6 +535,14 @@ script ThreeLaneBoard extends Component
 			.. "|" .. tostring(monster.NexusDamage)
 			.. "|" .. monster.NameKey
 			.. "|" .. monster.EffectTextKey
+			.. "|" .. tostring(data:CalculateGrade("HP", monster.HP))
+			.. "|" .. tostring(data:CalculateGrade("Attack", monster.Attack))
+			.. "|" .. tostring(data:CalculateGrade("AttackInterval", monster.AttackInterval))
+			.. "|" .. tostring(data:CalculateGrade("MoveSpeed", monster.MoveSpeed))
+			.. "|" .. tostring(data:CalculateGrade("NexusDamage", monster.NexusDamage))
+			.. "|" .. tostring(portraitScale)
+			.. "|" .. tostring(portraitOffsetX)
+			.. "|" .. tostring(portraitOffsetY)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1011,9 +1028,17 @@ script ThreeLaneBoard extends Component
 			return
 		end
 		command.EffectSelectionState = "Selecting"
-		if ownerSide == 2 then
-			self:ApplyRibbonTargetSelection(command, candidates[1])
+		if ownerSide == 1 then
+			-- 플레이어는 후보 수와 무관하게 반드시 HUD에서 정확한 CardInstanceId를 고른다.
+			log(
+				"[Phase2C5][RibbonManual] AwaitingPlayerSelection Candidates="
+				.. tostring(#candidates)
+				.. ", Source=" .. command.CardInstanceId
+			)
+			return
 		end
+		-- UI가 없는 PvE AI만 자기 합법 후보 중 결정론적 1순위를 자동 선택한다.
+		self:ApplyRibbonTargetSelection(command, candidates[1])
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1572,6 +1597,8 @@ script ThreeLaneBoard extends Component
 		unitComponent.CardIndex = monster.CardIndex
 		unitComponent.CardInstanceId = command.CardInstanceId or ""
 		unitComponent.MonsterId = monster.MonsterId
+		unitComponent.NameKey = monster.NameKey
+		unitComponent.DisplayNameFallback = monster.DevName
 		unitComponent.RangeClass = monster.RangeClass
 		unitComponent.Cost = monster.Cost
 		unitComponent.HP = monster.HP
@@ -3865,10 +3892,14 @@ script ThreeLaneBoard extends Component
 			if not self:TryReserveCardInstance(1, 15, ids[2], "MakerC5") then return false end
 			local command = self.PendingPlacements[1]
 			local candidates = self:BuildRibbonEffectCandidates(1, command)
+			local explicitSelectionRequired = command.EffectSelectionState == "Selecting"
+				and command.EffectTargetInstanceId == ""
+				and command.EffectDestinationSlotIndex == 0
 			self:RequestConfirmPlacement()
 			local confirmBlocked = self.Phase == "Placement" and self:HasUnresolvedRibbonSelection(1)
 			return #candidates == 1
 				and candidates[1].InstanceId == ids[1]
+				and explicitSelectionRequired
 				and confirmBlocked
 				and self:TrySelectRibbonEffectTarget(1, ids[2], ids[1])
 				and command.EffectSelectionState == "Selected"
@@ -4101,10 +4132,13 @@ script ThreeLaneBoard extends Component
 			if passed then
 				local back = unit.Entity:GetChildByName("HealthBarBack")
 				local fill = unit.Entity:GetChildByName("HealthBarFill")
+				local nameEntity = unit.Entity:GetChildByName("NameplateName")
 				passed = unit.HasCombatVisualProfile
 					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.IdleRuid
 					and unit.Entity.SpriteRendererComponent.FlipX == (entry.Side == 1)
 					and isvalid(back) and isvalid(fill)
+					and isvalid(nameEntity) and isvalid(nameEntity.TextRendererComponent)
+					and unit.NameKey ~= "" and nameEntity.TextRendererComponent.Text ~= ""
 				unit:RefreshLocomotionVisual(100, true, 1)
 				passed = passed and unit.VisualState == "Move"
 					and unit.Entity.SpriteRendererComponent.SpriteRUID == profile.MoveRuid
@@ -4153,6 +4187,144 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C5NameplateRegression()
+		-- 같은 라인의 가까운 실제 유닛 3기를 CombatUnitId 순서로 쌓고 HP 생명주기를 함께 확인한다.
+		if not self:PreparePhase2C4ATestState(5292, 10292) then
+			return false
+		end
+		local combat = self:GetCombat()
+		local entries = {
+			{ MonsterId = "slime", InstanceId = "C5_NAME_SLIME", X = -0.20 },
+			{ MonsterId = "orange_mushroom", InstanceId = "C5_NAME_ORANGE", X = 0.00 },
+			{ MonsterId = "green_mushroom", InstanceId = "C5_NAME_GREEN", X = 0.20 }
+		}
+		for index, entry in ipairs(entries) do
+			local monster = self:GetMonsterById(entry.MonsterId)
+			self:SpawnPlacement({
+				Order = index,
+				CardIndex = monster.CardIndex,
+				MonsterId = entry.MonsterId,
+				CardInstanceId = entry.InstanceId,
+				SlotIndex = index,
+				Position = Vector3(entry.X, 1.5, 0),
+				OwnerSide = 1,
+				OwnerUserId = "",
+				EffectTargetInstanceId = "",
+				EffectDestinationSlotIndex = 0,
+				RevealEffectResolved = false
+			})
+		end
+		local first = self:FindActiveUnitByInstanceId(entries[1].InstanceId)
+		local second = self:FindActiveUnitByInstanceId(entries[2].InstanceId)
+		local third = self:FindActiveUnitByInstanceId(entries[3].InstanceId)
+		if first == nil or second == nil or third == nil
+			or not isvalid(first) or not isvalid(second) or not isvalid(third) then
+			return false
+		end
+		combat:RefreshNameplateLayout(combat:BuildStableSnapshot())
+		local firstName = first.Entity:GetChildByName("NameplateName")
+		local secondName = second.Entity:GetChildByName("NameplateName")
+		local thirdName = third.Entity:GetChildByName("NameplateName")
+		local stableStack = first.CombatUnitId < second.CombatUnitId
+			and second.CombatUnitId < third.CombatUnitId
+			and first.NameplateStackLevel == 0
+			and second.NameplateStackLevel == 1
+			and third.NameplateStackLevel == 2
+		local namesReady = isvalid(firstName) and isvalid(secondName) and isvalid(thirdName)
+			and first.NameKey == "monster.slime.name"
+			and second.NameKey == "monster.orange_mushroom.name"
+			and third.NameKey == "monster.green_mushroom.name"
+			and firstName.TextRendererComponent.Text == "슬라임"
+			and secondName.TextRendererComponent.Text == "주황버섯"
+			and thirdName.TextRendererComponent.Text == "초록버섯"
+		local back = first.Entity:GetChildByName("HealthBarBack")
+		local fill = first.Entity:GetChildByName("HealthBarFill")
+		first.HP = math.floor(first.MaxHP / 2)
+		first:PlayHitVisual(1, 1)
+		local damaged = isvalid(back) and isvalid(fill)
+			and math.abs(fill.TransformComponent.Scale.x - first.HealthBarWidthScale * 0.5) <= 0.0001
+			and firstName.Enable == true
+		first:PlayDeathVisual(2, 1)
+		local hiddenOnDeath = back.Enable == false and fill.Enable == false and firstName.Enable == false
+		first.HP = first.MaxHP
+		first:ResetCombatState()
+		local restored = back.Enable == true and fill.Enable == true and firstName.Enable == true
+			and math.abs(fill.TransformComponent.Scale.x - first.HealthBarWidthScale) <= 0.0001
+		third.SimX = 3.0
+		combat:RefreshNameplateLayout(combat:BuildStableSnapshot())
+		local regrouped = first.NameplateStackLevel == 0
+			and second.NameplateStackLevel == 1
+			and third.NameplateStackLevel == 0
+		log(
+			"[Phase2C5][Nameplate] Ids="
+			.. tostring(first.CombatUnitId) .. "/" .. tostring(second.CombatUnitId) .. "/" .. tostring(third.CombatUnitId)
+			.. ", Stack=" .. tostring(first.NameplateStackLevel) .. "/" .. tostring(second.NameplateStackLevel) .. "/" .. tostring(third.NameplateStackLevel)
+		)
+		return stableStack and namesReady and damaged and hiddenOnDeath and restored and regrouped
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C5GradePortraitRegression()
+		-- 소유자 전용 카드 레코드가 서버 계산 5등급과 8종 초상화 프로필을 모두 포함하는지 확인한다.
+		local data = self:GetData()
+		if not isvalid(data) then
+			return false
+		end
+		local monsterIds = {
+			"slime", "ribbon_pig", "orange_mushroom", "green_mushroom",
+			"stone_golem", "yeti", "junior_balrog", "pink_bean"
+		}
+		local allPassed = true
+		for _, monsterId in ipairs(monsterIds) do
+			local monster = data:GetMonsterById(monsterId)
+			local profile = data:GetCombatVisualProfile(monsterId)
+			if monster == nil or profile == nil then
+				allPassed = false
+			else
+				local grades = {
+					data:CalculateGrade("HP", monster.HP),
+					data:CalculateGrade("Attack", monster.Attack),
+					data:CalculateGrade("AttackInterval", monster.AttackInterval),
+					data:CalculateGrade("MoveSpeed", monster.MoveSpeed),
+					data:CalculateGrade("NexusDamage", monster.NexusDamage)
+				}
+				local validGrades = true
+				for _, grade in ipairs(grades) do
+					if grade < 1 or grade > 5 then validGrades = false end
+				end
+				local record = self:BuildCardDisplayRecord({
+					InstanceId = "C5_GRADE_" .. monsterId,
+					MonsterId = monsterId,
+					State = "Hand"
+				})
+				local fieldCount = 0
+				for _ in string.gmatch(record, "[^|]+") do fieldCount = fieldCount + 1 end
+				local validPortrait = profile.PortraitScale ~= nil and profile.PortraitScale > 0
+					and profile.PortraitOffsetX ~= nil and profile.PortraitOffsetY ~= nil
+				local passed = validGrades and validPortrait and fieldCount == 24
+				allPassed = passed and allPassed
+				log(
+					"[Phase2C5][CardDisplay] Monster=" .. monsterId
+					.. ", Grades=" .. table.concat(grades, "/")
+					.. ", Portrait=" .. tostring(profile.PortraitScale)
+					.. "/" .. tostring(profile.PortraitOffsetX)
+					.. "/" .. tostring(profile.PortraitOffsetY)
+					.. ", Fields=" .. tostring(fieldCount)
+				)
+			end
+		end
+		local drake = data:GetMonsterById("drake")
+		local drakePassed = drake ~= nil
+			and data:CalculateGrade("HP", drake.HP) == 3
+			and data:CalculateGrade("Attack", drake.Attack) == 3
+			and data:CalculateGrade("AttackInterval", drake.AttackInterval) == 3
+			and data:CalculateGrade("MoveSpeed", drake.MoveSpeed) == 3
+			and data:CalculateGrade("NexusDamage", drake.NexusDamage) == 3
+		log("[Phase2C5][CardDisplay] DrakeGrades=3/3/3/3/3")
+		return allPassed and drakePassed
+	end
+
+	@ExecSpace("ServerOnly")
 	method boolean RunMakerPhase2C5Tests()
 		local combat = self:GetCombat()
 		if not isvalid(combat) then
@@ -4178,6 +4350,14 @@ script ThreeLaneBoard extends Component
 		allPassed = self:RecordPhase2C5Regression(
 			"PresentationExpandedEight",
 			self:RunPhase2C5ExpandedPresentationRegression()
+		) and allPassed
+		allPassed = self:RecordPhase2C5Regression(
+			"NameplateOverlapAndLifecycle",
+			self:RunPhase2C5NameplateRegression()
+		) and allPassed
+		allPassed = self:RecordPhase2C5Regression(
+			"GradeAndPortraitProfiles",
+			self:RunPhase2C5GradePortraitRegression()
 		) and allPassed
 		self:KillActiveUnits()
 		combat:ResetSimulation(false)

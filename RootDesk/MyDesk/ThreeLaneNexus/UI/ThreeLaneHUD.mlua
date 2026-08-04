@@ -146,6 +146,8 @@ script ThreeLaneHUD extends Component
 
 	property table ImageRuidByEntityId = {}
 
+	property table PortraitBasePositionByEntityId = {}
+
 	property integer HudDataRefreshCount = 0
 
 	property integer DynamicTimerRefreshCount = 0
@@ -177,6 +179,7 @@ script ThreeLaneHUD extends Component
 		self.CardVisualSignatureBySlot = {}
 		self.PermanentVisualSignatureBySlot = {}
 		self.ImageRuidByEntityId = {}
+		self.PortraitBasePositionByEntityId = {}
 		self.HudDataRefreshCount = 0
 		self.DynamicTimerRefreshCount = 0
 		self.CardMutationCount = 0
@@ -433,7 +436,7 @@ script ThreeLaneHUD extends Component
 	@ExecSpace("ClientOnly")
 	method table ParseCardRecord(string value)
 		local fields = self:SplitRecord(value)
-		if #fields < 16 then
+		if #fields < 24 then
 			return nil
 		end
 		return {
@@ -443,10 +446,14 @@ script ThreeLaneHUD extends Component
 			HP = tonumber(fields[10]) or 0, Attack = tonumber(fields[11]) or 0,
 			AttackInterval = tonumber(fields[12]) or 0, MoveSpeed = tonumber(fields[13]) or 0,
 			NexusDamage = tonumber(fields[14]) or 0, NameKey = fields[15], EffectTextKey = fields[16],
-			ReservedSlotIndex = tonumber(fields[17]) or 0,
-			PermanentSlotIndex = tonumber(fields[17]) or 0,
-			VisualState = fields[18] or "Alive",
-			PlacementOrder = tonumber(fields[19]) or 0
+			HPGrade = tonumber(fields[17]) or 0, AttackGrade = tonumber(fields[18]) or 0,
+			AttackSpeedGrade = tonumber(fields[19]) or 0, MoveSpeedGrade = tonumber(fields[20]) or 0,
+			NexusDamageGrade = tonumber(fields[21]) or 0, PortraitScale = tonumber(fields[22]) or 1,
+			PortraitOffsetX = tonumber(fields[23]) or 0, PortraitOffsetY = tonumber(fields[24]) or 0,
+			ReservedSlotIndex = tonumber(fields[25]) or 0,
+			PermanentSlotIndex = tonumber(fields[25]) or 0,
+			VisualState = fields[26] or "Alive",
+			PlacementOrder = tonumber(fields[27]) or 0
 		}
 	end
 
@@ -456,20 +463,26 @@ script ThreeLaneHUD extends Component
 		for _, record in ipairs(self.HandCards) do
 			table.insert(
 				parts,
-				record.InstanceId
-					.. ":" .. record.State
-					.. ":" .. tostring(record.ReservedSlotIndex)
-					.. ":" .. record.ImageRuid
+					record.InstanceId
+						.. ":" .. record.State
+						.. ":" .. tostring(record.ReservedSlotIndex)
+						.. ":" .. record.ImageRuid
+						.. ":" .. tostring(record.PortraitScale)
+						.. ":" .. tostring(record.PortraitOffsetX)
+						.. ":" .. tostring(record.PortraitOffsetY)
 			)
 		end
 		table.insert(parts, "#")
 		for _, record in ipairs(self.InstalledCards) do
 			table.insert(
 				parts,
-				record.InstanceId
-					.. ":" .. tostring(record.PermanentSlotIndex)
-					.. ":" .. record.VisualState
-					.. ":" .. record.ImageRuid
+					record.InstanceId
+						.. ":" .. tostring(record.PermanentSlotIndex)
+						.. ":" .. record.VisualState
+						.. ":" .. record.ImageRuid
+						.. ":" .. tostring(record.PortraitScale)
+						.. ":" .. tostring(record.PortraitOffsetX)
+						.. ":" .. tostring(record.PortraitOffsetY)
 			)
 		end
 		return table.concat(parts, ",")
@@ -521,6 +534,42 @@ script ThreeLaneHUD extends Component
 		end
 		entity.SpriteGUIRendererComponent.ImageRUID = DataRef(ruid)
 		self.ImageRuidByEntityId[key] = ruid
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyPortraitProfile(Entity portrait, table record)
+		-- 모든 카드 표면은 UIBuilder가 만든 하단 중앙 Portrait 영역과 같은 정규화 프로필을 사용한다.
+		if not isvalid(portrait) or record == nil
+			or not isvalid(portrait.UITransformComponent)
+			or not isvalid(portrait.SpriteGUIRendererComponent) then
+			return
+		end
+		self:SetImageIfChanged(portrait, record.ImageRuid)
+		if portrait.SpriteGUIRendererComponent.PreserveSprite ~= PreserveSpriteType.AspectOnly then
+			portrait.SpriteGUIRendererComponent.PreserveSprite = PreserveSpriteType.AspectOnly
+		end
+		local key = portrait.Id
+		local basePosition = self.PortraitBasePositionByEntityId[key]
+		if basePosition == nil then
+			basePosition = Vector2(
+				portrait.UITransformComponent.anchoredPosition.x,
+				portrait.UITransformComponent.anchoredPosition.y
+			)
+			self.PortraitBasePositionByEntityId[key] = basePosition
+		end
+		local scale = record.PortraitScale or 1
+		local offsetX = (record.PortraitOffsetX or 0) * portrait.UITransformComponent.RectSize.x
+		local offsetY = (record.PortraitOffsetY or 0) * portrait.UITransformComponent.RectSize.y
+		local targetX = basePosition.x + offsetX
+		local targetY = basePosition.y + offsetY
+		if math.abs(portrait.UITransformComponent.anchoredPosition.x - targetX) > 0.0001
+			or math.abs(portrait.UITransformComponent.anchoredPosition.y - targetY) > 0.0001 then
+			portrait.UITransformComponent.anchoredPosition = Vector2(targetX, targetY)
+		end
+		if math.abs(portrait.UITransformComponent.UIScale.x - scale) > 0.0001
+			or math.abs(portrait.UITransformComponent.UIScale.y - scale) > 0.0001 then
+			portrait.UITransformComponent.UIScale = Vector3(scale, scale, 1)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -774,7 +823,7 @@ script ThreeLaneHUD extends Component
 		end
 		self:SetEntityEnable(cardEntity, true)
 		local portrait = cardEntity:GetChildByName("Portrait")
-		self:SetImageIfChanged(portrait, record.ImageRuid)
+		self:ApplyPortraitProfile(portrait, record)
 		self:SetEntityText(cardEntity:GetChildByName("Name"), record.DevName)
 		self:SetEntityText(cardEntity:GetChildByName("Cost"), tostring(record.Cost))
 		local rangeLabel = "근접"
@@ -813,6 +862,9 @@ script ThreeLaneHUD extends Component
 					.. "|" .. tostring(placementOpen)
 					.. "|" .. tostring(board.CurrentCost)
 					.. "|" .. tostring(self.SelectedCardInstanceId == record.InstanceId)
+					.. "|" .. tostring(record.PortraitScale)
+					.. "|" .. tostring(record.PortraitOffsetX)
+					.. "|" .. tostring(record.PortraitOffsetY)
 			end
 			local changed = self.CardVisualSignatureBySlot[visualSlot] ~= signature
 			if changed then
@@ -860,7 +912,13 @@ script ThreeLaneHUD extends Component
 			if record == nil then
 				table.insert(parts, "Empty")
 			else
-				table.insert(parts, record.InstanceId .. ":" .. record.State .. ":" .. record.ImageRuid)
+				table.insert(
+					parts,
+					record.InstanceId .. ":" .. record.State .. ":" .. record.ImageRuid
+						.. ":" .. tostring(record.PortraitScale)
+						.. ":" .. tostring(record.PortraitOffsetX)
+						.. ":" .. tostring(record.PortraitOffsetY)
+				)
 			end
 		end
 		local signature = table.concat(parts, "|")
@@ -1330,6 +1388,12 @@ script ThreeLaneHUD extends Component
 				.. "|" .. candidateId
 				.. "|" .. tostring(destination)
 				.. "|" .. tostring(self.SelectedReservedSlot == slotIndex)
+			if installed ~= nil then
+				signature = signature
+					.. "|" .. tostring(installed.PortraitScale)
+					.. "|" .. tostring(installed.PortraitOffsetX)
+					.. "|" .. tostring(installed.PortraitOffsetY)
+			end
 			if self.PermanentVisualSignatureBySlot[slotIndex] ~= signature then
 				self.PermanentVisualSignatureBySlot[slotIndex] = signature
 				self.PermanentMutationCount = self.PermanentMutationCount + 1
@@ -1362,7 +1426,7 @@ script ThreeLaneHUD extends Component
 					self:SetEntityEnable(marker, false)
 				elseif isvalid(marker) and isvalid(slotEntity) then
 					self:SetEntityEnable(marker, true)
-					self:SetImageIfChanged(marker:GetChildByName("Portrait"), installed.ImageRuid)
+					self:ApplyPortraitProfile(marker:GetChildByName("Portrait"), installed)
 					local deadShade = marker:GetChildByName("DeadShade")
 					self:SetEntityEnable(deadShade, installed.VisualState == "Dead")
 					local worldPosition = slotEntity.TransformComponent.WorldPosition
@@ -1381,25 +1445,54 @@ script ThreeLaneHUD extends Component
 		self.DetailInstanceId = record.InstanceId
 		self.CardDetailPanel.Enable = true
 		local portrait = self.CardDetailPanel:GetChildByName("Portrait")
-		if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
-			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
-		end
-		self:SetEntityText(self.CardDetailPanel:GetChildByName("Name"), record.DevName)
+		self:ApplyPortraitProfile(portrait, record)
+		self:SetEntityText(
+			self.CardDetailPanel:GetChildByName("Name"),
+			record.DevName .. " · 코스트 " .. tostring(record.Cost)
+		)
 		local rangeLabel = "근접"
 		if record.RangeClass == "Ranged" then
 			rangeLabel = "원거리"
 		end
 		self:SetEntityText(
 			self.CardDetailPanel:GetChildByName("Stats"),
-			"코스트 " .. tostring(record.Cost) .. " · " .. rangeLabel
-			.. "\nHP " .. tostring(record.HP) .. "  공격 " .. tostring(record.Attack)
-			.. "  수호석 " .. tostring(record.NexusDamage)
+			self:FormatGradeLine("체력", record.HPGrade)
+			.. "\n" .. self:FormatGradeLine("공격력", record.AttackGrade)
+			.. "\n" .. self:FormatGradeLine("공격 속도", record.AttackSpeedGrade)
+			.. "\n" .. self:FormatGradeLine("이동 속도", record.MoveSpeedGrade)
+			.. "\n" .. self:FormatGradeLine("수호석 피해", record.NexusDamageGrade)
 		)
 		local effectText = "특수효과 없음"
 		if record.EffectType ~= "None" then
 			effectText = "특수효과 · " .. record.EffectType
 		end
-		self:SetEntityText(self.CardDetailPanel:GetChildByName("Effect"), effectText)
+		self:SetEntityText(
+			self.CardDetailPanel:GetChildByName("Effect"),
+			"공격 유형: " .. rangeLabel .. "\n" .. effectText
+		)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetGradeLabel(integer grade)
+		if grade == 1 then return "매우 낮음" end
+		if grade == 2 then return "낮음" end
+		if grade == 3 then return "보통" end
+		if grade == 4 then return "높음" end
+		if grade == 5 then return "매우 높음" end
+		return "미정"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatGradeLine(string label, integer grade)
+		local clamped = grade
+		if clamped < 0 then clamped = 0 end
+		if clamped > 5 then clamped = 5 end
+		local dots = ""
+		for index = 1, 5 do
+			if index <= clamped then dots = dots .. "●"
+			else dots = dots .. "○" end
+		end
+		return label .. ": " .. dots .. " · " .. self:GetGradeLabel(grade)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1449,9 +1542,7 @@ script ThreeLaneHUD extends Component
 		self.BurnToast.Enable = true
 		self.BurnToastRemaining = 3.0
 		local portrait = self.BurnToast:GetChildByName("Portrait")
-		if isvalid(portrait) and isvalid(portrait.SpriteGUIRendererComponent) then
-			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(record.ImageRuid)
-		end
+		self:ApplyPortraitProfile(portrait, record)
 		self:SetEntityText(self.BurnToast:GetChildByName("Name"), record.DevName)
 		self:SetEntityText(self.BurnToast:GetChildByName("Message"), "패가 가득 차 카드가 소실되었습니다")
 	end

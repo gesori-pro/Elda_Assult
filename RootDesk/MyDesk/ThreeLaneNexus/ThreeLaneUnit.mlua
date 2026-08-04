@@ -21,6 +21,12 @@ script ThreeLaneUnit extends Component
 
 	property string MonsterId = "drake"
 
+	@Sync
+	property string NameKey = "monster.drake.name"
+
+	@Sync
+	property string DisplayNameFallback = "드레이크"
+
 	property string RangeClass = "Melee"
 
 	property integer Cost = 5
@@ -80,6 +86,14 @@ script ThreeLaneUnit extends Component
 	property number HealthBarYOffset = 0.72
 
 	property number HealthBarWidthScale = 3.5
+
+	property number NameplateYOffset = 0.72
+
+	property number NameplateNameOffset = 0.20
+
+	property number NameplateStackStep = 0.22
+
+	property integer NameplateStackLevel = 0
 
 	property number SimX = 0
 
@@ -145,9 +159,11 @@ script ThreeLaneUnit extends Component
 		self.DamageIntentHistory = {}
 		self:SetVisualVelocity(0)
 		self.VisualStateUntilTick = 0
+		self.NameplateStackLevel = 0
 		if self.HasCombatVisualProfile then
 			self:SetCombatVisualState("Idle", 0, 0, self.VisualPlaybackSpeed, true)
 			self:SetHealthBarVisible(true)
+			self:ConfigureHealthBarTransform()
 			self:UpdateHealthBarVisual()
 		end
 	end
@@ -176,8 +192,10 @@ script ThreeLaneUnit extends Component
 		self.HitRuid = profile.HitRuid or self.IdleRuid
 		self.DieRuid = profile.DieRuid or self.IdleRuid
 		self.NexusRuid = profile.NexusRuid or self.AttackRuid
-		self.HealthBarYOffset = profile.HealthBarYOffset or 0.72
+		self.NameplateYOffset = profile.NameplateYOffset or profile.HealthBarYOffset or 0.72
+		self.HealthBarYOffset = self.NameplateYOffset
 		self.HealthBarWidthScale = profile.HealthBarWidthScale or 3.5
+		self.NameplateStackLevel = 0
 		self.VisualPlaybackSpeed = speed == 2 and 2 or 1
 		if isvalid(self.Entity.SpriteRendererComponent) then
 			self.Entity.SpriteRendererComponent.Color = Color(1.0, 1.0, 1.0, 1.0)
@@ -187,6 +205,8 @@ script ThreeLaneUnit extends Component
 		self:ConfigureHealthBarTransform()
 		self:SetHealthBarVisible(true)
 		self:UpdateHealthBarVisual()
+		self:SetNameplateFallbackText()
+		self:ApplyLocalizedNameplate(self.NameKey, self.DisplayNameFallback)
 		self:SetCombatVisualState("Idle", 0, 0, self.VisualPlaybackSpeed, true)
 		log(
 			"[Phase2C5][Visual] Profile Monster=" .. self.MonsterId
@@ -194,6 +214,35 @@ script ThreeLaneUnit extends Component
 			.. ", Side=" .. tostring(self.OwnerSide)
 			.. ", FlipX=" .. tostring(self.OwnerSide == 1)
 		)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetNameplateFallbackText()
+		local nameEntity = self.Entity:GetChildByName("NameplateName")
+		if isvalid(nameEntity) and isvalid(nameEntity.TextRendererComponent) then
+			local renderer = nameEntity.TextRendererComponent
+			renderer.Text = self.DisplayNameFallback
+			renderer.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			renderer.OutlineColor = Color(0.05, 0.06, 0.08, 1.0)
+			renderer.OutlineWidth = 0.12
+		end
+	end
+
+	@ExecSpace("Client")
+	method void ApplyLocalizedNameplate(string nameKey, string fallbackName)
+		-- 이름의 권위 키는 NameKey다. LocaleDataSet이 아직 없거나 키가 비면 읽을 수 있는 한국어 fallback을 쓴다.
+		local nameEntity = self.Entity:GetChildByName("NameplateName")
+		if not isvalid(nameEntity) or not isvalid(nameEntity.TextRendererComponent) then
+			return
+		end
+		local displayName = ""
+		if nameKey ~= nil and nameKey ~= "" then
+			displayName = _LocalizationService:GetText(nameKey)
+		end
+		if displayName == nil or displayName == "" or displayName == nameKey then
+			displayName = fallbackName
+		end
+		nameEntity.TextRendererComponent.Text = displayName
 	end
 
 	@ExecSpace("ServerOnly")
@@ -285,14 +334,31 @@ script ThreeLaneUnit extends Component
 	method void ConfigureHealthBarTransform()
 		local back = self.Entity:GetChildByName("HealthBarBack")
 		local fill = self.Entity:GetChildByName("HealthBarFill")
+		local nameEntity = self.Entity:GetChildByName("NameplateName")
+		local stackedYOffset = self.NameplateYOffset
+			+ self.NameplateStackStep * self.NameplateStackLevel
 		if isvalid(back) then
-			back.TransformComponent.Position = Vector3(0, self.HealthBarYOffset, 0)
+			back.TransformComponent.Position = Vector3(0, stackedYOffset, 0)
 			back.TransformComponent.Scale = Vector3(self.HealthBarWidthScale, 1, 1)
 		end
 		if isvalid(fill) then
-			fill.TransformComponent.Position = Vector3(0, self.HealthBarYOffset, 0)
+			fill.TransformComponent.Position = Vector3(0, stackedYOffset, 0)
 			fill.TransformComponent.Scale = Vector3(self.HealthBarWidthScale, 1, 1)
 		end
+		if isvalid(nameEntity) then
+			nameEntity.TransformComponent.Position = Vector3(0, stackedYOffset + self.NameplateNameOffset, 0)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetNameplateStackLevel(integer stackLevel)
+		local normalized = stackLevel
+		if normalized < 0 then normalized = 0 end
+		if self.NameplateStackLevel == normalized then
+			return
+		end
+		self.NameplateStackLevel = normalized
+		self:ConfigureHealthBarTransform()
 	end
 
 	@ExecSpace("ServerOnly")
@@ -310,7 +376,7 @@ script ThreeLaneUnit extends Component
 		fill.TransformComponent.Scale = Vector3(self.HealthBarWidthScale * ratio, 1, 1)
 		fill.TransformComponent.Position = Vector3(
 			-0.08 * self.HealthBarWidthScale * (1 - ratio),
-			self.HealthBarYOffset,
+			self.NameplateYOffset + self.NameplateStackStep * self.NameplateStackLevel,
 			0
 		)
 	end
@@ -319,8 +385,10 @@ script ThreeLaneUnit extends Component
 	method void SetHealthBarVisible(boolean visible)
 		local back = self.Entity:GetChildByName("HealthBarBack")
 		local fill = self.Entity:GetChildByName("HealthBarFill")
+		local nameEntity = self.Entity:GetChildByName("NameplateName")
 		if isvalid(back) then back.Enable = visible and self.HasCombatVisualProfile end
 		if isvalid(fill) then fill.Enable = visible and self.HasCombatVisualProfile end
+		if isvalid(nameEntity) then nameEntity.Enable = visible and self.HasCombatVisualProfile end
 	end
 
 end

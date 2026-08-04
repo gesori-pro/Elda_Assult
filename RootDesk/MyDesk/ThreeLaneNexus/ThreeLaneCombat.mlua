@@ -23,6 +23,8 @@ script ThreeLaneCombat extends Component
 
 	property integer NextCombatUnitId = 1
 
+	property number NameplateOverlapDistance = 1.0
+
 	property table Units = {}
 
 	property table UnitById = {}
@@ -104,6 +106,7 @@ script ThreeLaneCombat extends Component
 		self.BacklogWarned = false
 		self.BacklogWarningCount = 0
 		self:SetSimulationSpeed(speed)
+		self:RefreshNameplateLayout(self:BuildStableSnapshot())
 		self.IsRunning = true
 
 		local board = self:GetBoard()
@@ -210,6 +213,7 @@ script ThreeLaneCombat extends Component
 		self:CollectAttackIntents(snapshot, intents)
 		local damageTotals = self:ApplyDamageIntents(intents)
 		self:FinalizeDeathsAndExits(snapshot)
+		self:RefreshNameplateLayout(self:BuildStableSnapshot())
 
 		board:UpdateBattleRemainingFromCombat(self.SimTick, self.ActiveBattleLimitTicks)
 		board:ApplyNexusDamageBatch(
@@ -234,6 +238,51 @@ script ThreeLaneCombat extends Component
 		if self:CountActiveUnits() == 0 then
 			self.IsRunning = false
 			board:OnCombatResolved("AllResolved", self.SimTick)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshNameplateLayout(table snapshot)
+		-- 같은 라인의 가까운 이름표를 연결 그룹으로 묶고 CombatUnitId 오름차순으로 세로 단계를 고정한다.
+		local units = {}
+		for _, unit in ipairs(snapshot) do
+			if unit.IsTestUnit ~= true and isvalid(unit) and unit.HasCombatVisualProfile then
+				table.insert(units, unit)
+			end
+		end
+		local visited = {}
+		for _, seed in ipairs(units) do
+			if visited[seed.CombatUnitId] ~= true then
+				local group = { seed }
+				visited[seed.CombatUnitId] = true
+				local expanded = true
+				while expanded do
+					expanded = false
+					for _, candidate in ipairs(units) do
+						if visited[candidate.CombatUnitId] ~= true
+							and candidate.LaneIndex == seed.LaneIndex then
+							local overlaps = false
+					for _, groupUnit in ipairs(group) do
+						if math.abs(candidate.SimX - groupUnit.SimX) <= self.NameplateOverlapDistance then
+									overlaps = true
+									break
+								end
+							end
+							if overlaps then
+								table.insert(group, candidate)
+								visited[candidate.CombatUnitId] = true
+								expanded = true
+							end
+						end
+					end
+				end
+				table.sort(group, function(a, b)
+					return a.CombatUnitId < b.CombatUnitId
+				end)
+				for index, unit in ipairs(group) do
+					unit:SetNameplateStackLevel(index - 1)
+				end
+			end
 		end
 	end
 
