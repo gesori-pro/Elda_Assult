@@ -343,40 +343,31 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
-	method boolean ConfirmInitialReroll(integer ownerSide, table selectedInstanceIds)
-		-- 선택 인스턴스를 임시 제외하고 남은 덱에서 먼저 교체한 뒤 제외 카드를 되돌려 섞는다.
+	method boolean ConfirmInitialReroll(integer ownerSide, boolean replaceAll)
+		-- 첫 패 4장을 유지하거나, 전부 임시 제외한 뒤 새 4장을 먼저 뽑고 제외 카드를 덱에 되돌린다.
 		local state = self:GetCardState(ownerSide)
-		if state == nil or state.RerollUsed then
+		if state == nil or state.RerollUsed or #state.Hand ~= 4 then
 			return false
 		end
-		local selectedSet = {}
-		for _, instanceId in ipairs(selectedInstanceIds) do
-			if selectedSet[instanceId] == true or self:FindIdIndex(state.Hand, instanceId) == 0 then
-				return false
-			end
-			selectedSet[instanceId] = true
-		end
-
-		local kept = {}
 		local excluded = {}
-		for _, instanceId in ipairs(state.Hand) do
-			if selectedSet[instanceId] == true then
+		if replaceAll then
+			for _, instanceId in ipairs(state.Hand) do
 				table.insert(excluded, instanceId)
-			else
-				table.insert(kept, instanceId)
 			end
-		end
-		state.Hand = kept
+			state.Hand = {}
 
-		for _ = 1, #excluded do
-			self:DrawOneCard(ownerSide)
+			for _ = 1, 4 do
+				if self:DrawOneCard(ownerSide) == nil then
+					return false
+				end
+			end
+			for _, instanceId in ipairs(excluded) do
+				local instance = state.InstanceById[instanceId]
+				instance.State = "Deck"
+				table.insert(state.Deck, instanceId)
+			end
+			self:ShuffleInstanceIds(state, state.Deck)
 		end
-		for _, instanceId in ipairs(excluded) do
-			local instance = state.InstanceById[instanceId]
-			instance.State = "Deck"
-			table.insert(state.Deck, instanceId)
-		end
-		self:ShuffleInstanceIds(state, state.Deck)
 		state.RerollUsed = true
 		self:SyncPublicCardCounts()
 		if ownerSide == 1 then
@@ -385,14 +376,28 @@ script ThreeLaneBoard extends Component
 		log(
 			"[Phase2C4A][Reroll] Confirm Side="
 			.. tostring(ownerSide)
-			.. ", Selected="
-			.. tostring(#excluded)
+			.. ", Choice="
+			.. (replaceAll and "ReplaceAll" or "Keep")
+			.. ", Replaced="
+			.. tostring(replaceAll and 4 or 0)
 			.. ", Hand="
 			.. tostring(#state.Hand)
 			.. ", Deck="
 			.. tostring(#state.Deck)
 		)
 		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ConfirmInitialMulliganChoice(integer ownerSide, string choice)
+		-- RPC와 테스트가 공유하는 화이트리스트. 카드 ID/CSV 등 부분 선택 입력은 허용하지 않는다.
+		if choice == "ReplaceAll" then
+			return self:ConfirmInitialReroll(ownerSide, true)
+		end
+		if choice == "Keep" then
+			return self:ConfirmInitialReroll(ownerSide, false)
+		end
+		return false
 	end
 
 	@ExecSpace("ServerOnly")
@@ -414,13 +419,13 @@ script ThreeLaneBoard extends Component
 		local autoConfirm = self.AutoConfirmRerollWithoutUI
 			or (isvalid(combat) and combat.MakerHarnessRunning)
 		if autoConfirm then
-			self:ConfirmInitialReroll(1, {})
-			self:ConfirmInitialReroll(2, {})
+			self:ConfirmInitialReroll(1, false)
+			self:ConfirmInitialReroll(2, false)
 			self.PlayerMulliganReady = true
 			self.EnemyMulliganReady = true
 		else
-			-- M1 AI는 자기 패에서 0장 유지로 비공개 리롤을 한 번 정상 소모한다.
-			self:ConfirmInitialReroll(2, {})
+			-- M1 AI는 플레이어와 같은 양자 선택 중 Keep을 비공개로 확정한다.
+			self:ConfirmInitialReroll(2, false)
 			self.EnemyMulliganReady = true
 		end
 		self:SyncPublicCardCounts()
@@ -626,8 +631,8 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("Server")
-	method void RequestConfirmMulligan(string selectedInstanceIds)
-		-- Mulligan에서만 한 번 허용하며 클라이언트가 제출한 인스턴스를 서버 손패로 다시 검증한다.
+	method void RequestConfirmMulligan(string choice)
+		-- Mulligan에서만 Keep/ReplaceAll 중 하나를 한 번 허용하며 부분 선택 입력은 거부한다.
 		if self.PlayerOwnerUserId ~= "" and self.PlayerOwnerUserId ~= senderUserId then
 			log_warning("[Phase2C4B][Mulligan] rejected - owner mismatch")
 			return
@@ -638,9 +643,8 @@ script ThreeLaneBoard extends Component
 			self:SendPrivateCardState("MulliganRejected", nil)
 			return
 		end
-		local selected = self:ParseInstanceIdList(selectedInstanceIds)
-		if not self:ConfirmInitialReroll(1, selected) then
-			log("[Phase2C4B][Mulligan] rejected - invalid selection")
+		if not self:ConfirmInitialMulliganChoice(1, choice) then
+			log("[Phase2C4B][Mulligan] rejected - invalid choice=" .. tostring(choice))
 			self:SendPrivateCardState("MulliganRejected", nil)
 			return
 		end
@@ -2282,22 +2286,24 @@ script ThreeLaneBoard extends Component
 		for _ = 1, 4 do
 			self:DrawOneCard(1)
 		end
-		local initial = self.PlayerCardState.Hand
-		local rerolled1 = initial[1]
-		local kept1 = initial[2]
-		local rerolled2 = initial[3]
-		local kept2 = initial[4]
-		local rerollPassed = self:ConfirmInitialReroll(1, { rerolled1, rerolled2 })
-		local keepsPassed = self:FindIdIndex(self.PlayerCardState.Hand, kept1) > 0
-			and self:FindIdIndex(self.PlayerCardState.Hand, kept2) > 0
-		local noImmediateReturn = self:FindIdIndex(self.PlayerCardState.Hand, rerolled1) == 0
-			and self:FindIdIndex(self.PlayerCardState.Hand, rerolled2) == 0
+		local initial = {}
+		for index, instanceId in ipairs(self.PlayerCardState.Hand) do
+			initial[index] = instanceId
+		end
+		local rerollPassed = self:ConfirmInitialReroll(1, true)
+		local allReplaced = true
+		for _, instanceId in ipairs(initial) do
+			if self:FindIdIndex(self.PlayerCardState.Hand, instanceId) > 0 then
+				allReplaced = false
+			end
+		end
+		local noImmediateReturn = allReplaced
 		self:DrawForTurn(1, 1)
 		allPassed = self:RecordPhase2C4ARegression(
-			"Initial4RerollTurn1Draw5",
+			"Initial4FullRerollTurn1Draw5",
 			rerollPassed and #self.PlayerCardState.Hand == 5
 		) and allPassed
-		allPassed = self:RecordPhase2C4ARegression("RerollKeepsUnselected", keepsPassed) and allPassed
+		allPassed = self:RecordPhase2C4ARegression("FullRerollReplacesAll", allReplaced) and allPassed
 		allPassed = self:RecordPhase2C4ARegression(
 			"RerolledInstanceNoImmediateReturn",
 			noImmediateReturn
@@ -2423,8 +2429,8 @@ script ThreeLaneBoard extends Component
 			self:DrawOneCard(1)
 			self:DrawOneCard(2)
 		end
-		self:ConfirmInitialReroll(1, {})
-		self:ConfirmInitialReroll(2, {})
+		self:ConfirmInitialReroll(1, false)
+		self:ConfirmInitialReroll(2, false)
 		self:DrawForTurn(1, 1)
 		self:DrawForTurn(2, 1)
 		local playerSignatureBeforeAi = self:GetDeckMonsterSignature(self.PlayerCardState)
@@ -3277,8 +3283,8 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
-	method boolean RunPhase2C4BMulliganCountScenario(integer selectedCount, integer seed)
-		-- 0~4장 선택을 각각 새 고정 Seed 상태에서 실행해 미선택 유지·즉시 재등장 금지·첫 패 5장을 검증한다.
+	method boolean RunPhase2C4BMulliganChoiceScenario(boolean replaceAll, integer seed)
+		-- Keep/ReplaceAll 양자 선택, 전면 교체 시 즉시 재등장 금지, 첫 턴 손패 5장을 검증한다.
 		self.AutoConfirmRerollWithoutUI = false
 		if not self:InitializeMatchCardStates(seed, seed + 5000) then
 			return false
@@ -3288,29 +3294,25 @@ script ThreeLaneBoard extends Component
 		end
 
 		local initialIds = {}
-		local selectedIds = {}
 		for index, instanceId in ipairs(self.PlayerCardState.Hand) do
 			initialIds[index] = instanceId
-			if index <= selectedCount then
-				table.insert(selectedIds, instanceId)
-			end
 		end
-		if not self:ConfirmInitialReroll(1, selectedIds) then
+		local choice = replaceAll and "ReplaceAll" or "Keep"
+		if not self:ConfirmInitialMulliganChoice(1, choice) then
 			return false
 		end
-		if self:ConfirmInitialReroll(1, {}) then
+		if self:ConfirmInitialMulliganChoice(1, choice) then
 			return false
 		end
 		if #self.PlayerCardState.Hand ~= 4 then
 			return false
 		end
-		for index = 1, selectedCount do
-			if self:Phase2C4BHandContains(self.PlayerCardState, initialIds[index]) then
+		for index, instanceId in ipairs(initialIds) do
+			local remains = self:Phase2C4BHandContains(self.PlayerCardState, instanceId)
+			if replaceAll and remains then
 				return false
 			end
-		end
-		for index = selectedCount + 1, 4 do
-			if not self:Phase2C4BHandContains(self.PlayerCardState, initialIds[index]) then
+			if not replaceAll and self.PlayerCardState.Hand[index] ~= instanceId then
 				return false
 			end
 		end
@@ -3321,6 +3323,32 @@ script ThreeLaneBoard extends Component
 		return self.Phase == "Placement"
 			and #self.PlayerCardState.Hand == 5
 			and self.PlayerHandCount == 5
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C4BPartialSelectionRejected(integer seed)
+		-- 구형 CardInstanceId/CSV 입력은 상태를 바꾸지 않고 거부되어야 한다.
+		self.AutoConfirmRerollWithoutUI = false
+		if not self:InitializeMatchCardStates(seed, seed + 5000) then
+			return false
+		end
+		local initialIds = {}
+		for index, instanceId in ipairs(self.PlayerCardState.Hand) do
+			initialIds[index] = instanceId
+		end
+		local oldPartialChoice = initialIds[1] .. "," .. initialIds[2]
+		if self:ConfirmInitialMulliganChoice(1, oldPartialChoice) then
+			return false
+		end
+		if self.PlayerCardState.RerollUsed or #self.PlayerCardState.Hand ~= 4 then
+			return false
+		end
+		for index, instanceId in ipairs(initialIds) do
+			if self.PlayerCardState.Hand[index] ~= instanceId then
+				return false
+			end
+		end
+		return true
 	end
 
 	@ExecSpace("ServerOnly")
@@ -3354,14 +3382,38 @@ script ThreeLaneBoard extends Component
 			allPassed = false
 		end
 
-		for selectedCount = 0, 4 do
-			local passed = self:RunPhase2C4BMulliganCountScenario(selectedCount, 4500 + selectedCount)
-			if passed then
-				log("[Phase2C4B][TEST][Mulligan" .. tostring(selectedCount) .. "] PASS")
-			else
-				log_error("[Phase2C4B][TEST][Mulligan" .. tostring(selectedCount) .. "] FAIL")
-				allPassed = false
-			end
+		local keepPassed = self:RunPhase2C4BMulliganChoiceScenario(false, 4500)
+		if keepPassed then
+			log("[Phase2C4B][TEST][KeepInitialFour] PASS")
+		else
+			log_error("[Phase2C4B][TEST][KeepInitialFour] FAIL")
+			allPassed = false
+		end
+
+		local replacePassed = self:RunPhase2C4BMulliganChoiceScenario(true, 4501)
+		if replacePassed then
+			log("[Phase2C4B][TEST][ReplaceAllFourNoImmediateReturn] PASS")
+		else
+			log_error("[Phase2C4B][TEST][ReplaceAllFourNoImmediateReturn] FAIL")
+			allPassed = false
+		end
+
+		local partialRejected = self:RunPhase2C4BPartialSelectionRejected(4502)
+		if partialRejected then
+			log("[Phase2C4B][TEST][PartialSelectionRejected] PASS")
+		else
+			log_error("[Phase2C4B][TEST][PartialSelectionRejected] FAIL")
+			allPassed = false
+		end
+
+		self:InitializeMatchCardStates(4503, 9503)
+		local firstAccepted = self:ConfirmInitialMulliganChoice(1, "Keep")
+		local secondRejected = not self:ConfirmInitialMulliganChoice(1, "ReplaceAll")
+		if firstAccepted and secondRejected then
+			log("[Phase2C4B][TEST][SecondMulliganRejected] PASS")
+		else
+			log_error("[Phase2C4B][TEST][SecondMulliganRejected] FAIL")
+			allPassed = false
 		end
 
 		local orange = self:GetMonsterByCardIndex(8)

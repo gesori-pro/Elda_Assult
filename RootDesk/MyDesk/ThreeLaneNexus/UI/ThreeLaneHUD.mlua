@@ -50,8 +50,6 @@ script ThreeLaneHUD extends Component
 
 	property table InstalledCards = {}
 
-	property table MulliganSelectedIds = {}
-
 	property table MulliganCardEntities = {}
 
 	property table PermanentMarkerEntities = {}
@@ -65,8 +63,6 @@ script ThreeLaneHUD extends Component
 	property table CardEnterHandlers = {}
 
 	property table CardExitHandlers = {}
-
-	property table MulliganHandlers = {}
 
 	property any RestartHandler = nil
 
@@ -145,7 +141,6 @@ script ThreeLaneHUD extends Component
 		self.VisualRecordBySlot = {}
 		self.HandCards = {}
 		self.InstalledCards = {}
-		self.MulliganSelectedIds = {}
 		self.MulliganCardEntities = {}
 		self.PermanentMarkerEntities = {}
 
@@ -237,21 +232,11 @@ script ThreeLaneHUD extends Component
 
 	@ExecSpace("ClientOnly")
 	method void ConnectMulliganEvents()
-		self.MulliganHandlers = {}
 		for index = 1, 4 do
 			local cardEntity = self:GetHudEntity(
 				"MulliganOverlay/Window/Card_" .. tostring(index)
 			)
 			self.MulliganCardEntities[index] = cardEntity
-			local mulliganIndex = index
-			if isvalid(cardEntity) then
-				self.MulliganHandlers[index] = cardEntity:ConnectEvent(
-					UITouchDownEvent,
-					function(event)
-						self:ToggleMulliganCard(mulliganIndex)
-					end
-				)
-			end
 		end
 		if isvalid(self.MulliganReplaceButton) then
 			self.MulliganReplaceHandler = self.MulliganReplaceButton:ConnectEvent(
@@ -318,11 +303,6 @@ script ThreeLaneHUD extends Component
 				if self.CardExitHandlers[index] ~= nil then
 					cardEntity:DisconnectEvent(UITouchExitEvent, self.CardExitHandlers[index])
 				end
-			end
-		end
-		for index, cardEntity in ipairs(self.MulliganCardEntities) do
-			if isvalid(cardEntity) and self.MulliganHandlers[index] ~= nil then
-				cardEntity:DisconnectEvent(UITouchDownEvent, self.MulliganHandlers[index])
 			end
 		end
 		self:DisconnectButtons()
@@ -460,7 +440,6 @@ script ThreeLaneHUD extends Component
 		self.InstalledCards = installed
 
 		if eventType == "Reset" then
-			self.MulliganSelectedIds = {}
 			self.MulliganConfirmedLocally = false
 			self.SelectedCardInstanceId = ""
 			self.SelectedVisualSlot = 0
@@ -468,7 +447,6 @@ script ThreeLaneHUD extends Component
 			self.MulliganConfirmedLocally = false
 			self:SetCardHint("리롤 요청이 거부되었습니다. 현재 첫 패를 다시 확인해 주세요.")
 		elseif eventType == "MulliganComplete" then
-			self.MulliganSelectedIds = {}
 			self:SetCardHint("첫 턴 드로우가 완료되었습니다. 손패에서 배치할 카드를 고르세요.")
 		elseif eventType == "Burn" then
 			self:ShowBurnToast(self:ParseCardRecord(eventRecord))
@@ -668,26 +646,16 @@ script ThreeLaneHUD extends Component
 			local cardEntity = self.MulliganCardEntities[index]
 			self:SetCardEntityData(cardEntity, record)
 			if isvalid(cardEntity) then
-				local selected = record ~= nil and self.MulliganSelectedIds[record.InstanceId] == true
-				local selectedEntity = cardEntity:GetChildByName("Selected")
-				if isvalid(selectedEntity) then
-					selectedEntity.Enable = selected
-				end
-				local y = 30
-				if selected then
-					y = 52
-				end
 				cardEntity.UITransformComponent.anchoredPosition = Vector2(
 					cardEntity.UITransformComponent.anchoredPosition.x,
-					y
+					30
 				)
 			end
 		end
 
-		local selectedCount = self:GetMulliganSelectedCount()
 		if isvalid(self.MulliganReplaceButton) then
-			self:SetEntityText(self.MulliganReplaceButton, "선택 카드 교체 (" .. tostring(selectedCount) .. ")")
-			local usable = selectedCount > 0 and not self.MulliganConfirmedLocally
+			self:SetEntityText(self.MulliganReplaceButton, "패 전부 교체")
+			local usable = not self.MulliganConfirmedLocally
 			if isvalid(self.MulliganReplaceButton.ButtonComponent) then
 				self.MulliganReplaceButton.ButtonComponent.Enable = usable
 			end
@@ -705,63 +673,28 @@ script ThreeLaneHUD extends Component
 	end
 
 	@ExecSpace("ClientOnly")
-	method integer GetMulliganSelectedCount()
-		local count = 0
-		for _, record in ipairs(self.HandCards) do
-			if self.MulliganSelectedIds[record.InstanceId] == true then
-				count = count + 1
-			end
-		end
-		return count
-	end
-
-	@ExecSpace("ClientOnly")
-	method void ToggleMulliganCard(integer index)
-		local board = self:GetBoard()
-		if board == nil or board.Phase ~= "Mulligan" or self.MulliganConfirmedLocally then
-			return
-		end
-		local record = self.HandCards[index]
-		if record == nil then
-			return
-		end
-		self.MulliganSelectedIds[record.InstanceId] = self.MulliganSelectedIds[record.InstanceId] ~= true
-		self:RefreshMulliganVisual(board)
-	end
-
-	@ExecSpace("ClientOnly")
-	method string BuildMulliganSelectionCsv()
-		local selected = {}
-		for _, record in ipairs(self.HandCards) do
-			if self.MulliganSelectedIds[record.InstanceId] == true then
-				table.insert(selected, record.InstanceId)
-			end
-		end
-		return table.concat(selected, ",")
-	end
-
-	@ExecSpace("ClientOnly")
 	method void OnMulliganReplaceClicked(ButtonClickEvent event)
-		if self:GetMulliganSelectedCount() <= 0 then
-			return
-		end
-		self:SubmitMulligan(self:BuildMulliganSelectionCsv())
+		self:SubmitMulligan("ReplaceAll")
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnMulliganKeepClicked(ButtonClickEvent event)
-		self:SubmitMulligan("")
+		self:SubmitMulligan("Keep")
 	end
 
 	@ExecSpace("ClientOnly")
-	method void SubmitMulligan(string selectedCsv)
+	method void SubmitMulligan(string choice)
 		local board = self:GetBoard()
 		if board == nil or board.Phase ~= "Mulligan" or self.MulliganConfirmedLocally then
 			return
 		end
 		self.MulliganConfirmedLocally = true
-		board:RequestConfirmMulligan(selectedCsv)
-		self:SetCardHint("첫 패 선택을 확정했습니다. 서버 결과를 기다리는 중입니다.")
+		board:RequestConfirmMulligan(choice)
+		if choice == "ReplaceAll" then
+			self:SetCardHint("첫 패 4장 전부 교체를 요청했습니다. 서버 결과를 기다리는 중입니다.")
+		else
+			self:SetCardHint("현재 첫 패로 시작합니다. 서버 결과를 기다리는 중입니다.")
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1361,7 +1294,6 @@ script ThreeLaneHUD extends Component
 		end
 		self.SelectedCardInstanceId = ""
 		self.SelectedVisualSlot = 0
-		self.MulliganSelectedIds = {}
 		self.MulliganConfirmedLocally = false
 		self:ClearReservedSelection()
 		self:ClearSnapTarget()
