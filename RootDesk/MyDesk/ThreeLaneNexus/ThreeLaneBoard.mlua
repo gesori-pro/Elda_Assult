@@ -479,6 +479,8 @@ script ThreeLaneBoard extends Component
 		unitComponent.MoveSpeed = monster.MoveSpeed
 		unitComponent.AttackRange = monster.AttackRange
 		unitComponent.NexusDamage = monster.NexusDamage
+		unitComponent.SecondaryTargetLane = monster.SecondaryTargetLane
+		unitComponent.SecondaryDamageRate = monster.SecondaryDamageRate
 		unitComponent.SimX = command.Position.x
 		unitComponent.CombatStartX = command.Position.x
 		unitComponent.CombatStartY = command.Position.y
@@ -535,6 +537,10 @@ script ThreeLaneBoard extends Component
 			.. tostring(unitComponent.AttackRange)
 			.. ", NexusDamage="
 			.. tostring(unitComponent.NexusDamage)
+			.. ", Secondary="
+			.. unitComponent.SecondaryTargetLane
+			.. "/"
+			.. tostring(unitComponent.SecondaryDamageRate)
 		)
 	end
 
@@ -1770,6 +1776,118 @@ script ThreeLaneBoard extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2C3BActualSpawnRegression()
+		-- 실제 ThreeLaneUnit 5기를 소환해 데이터 전달과 집중·분산 추가타를 정상 Combat Tick으로 검증한다.
+		local combat = self:GetCombat()
+		local data = self:GetData()
+		if not isvalid(combat) or not isvalid(data) then
+			return false
+		end
+		combat.MakerHarnessRunning = true
+		self:ResetBattle()
+		combat.MakerHarnessRunning = true
+		combat.MakerTestMode = true
+		combat.CurrentScenario = "Phase2C3BActualSpawn"
+		self.BattleState = "Playing"
+		self.Phase = "Battle"
+		self.PlayerNexusHp = 30
+		self.EnemyNexusHp = 30
+		self.CurrentCost = 1
+		self.EnemyCurrentCost = 1
+
+		local green = self:SpawnPhase2C3BActualUnit("green_mushroom", 1, 1, Vector3(-0.3, 1.5, 0), 1)
+		local greenTarget = self:SpawnPhase2C3BActualUnit("drake", 2, 1, Vector3(0.3, 1.5, 0), 1)
+		local pink = self:SpawnPhase2C3BActualUnit("pink_bean", 1, 6, Vector3(-0.3, 0, 0), 2)
+		local pinkPrimary = self:SpawnPhase2C3BActualUnit("drake", 2, 6, Vector3(0.3, 0, 0), 2)
+		local pinkSecondary = self:SpawnPhase2C3BActualUnit("drake", 2, 11, Vector3(5.0, -1.5, 0), 3)
+		if green == nil or greenTarget == nil or pink == nil
+			or pinkPrimary == nil or pinkSecondary == nil then
+			return false
+		end
+
+		green.MoveSpeed = 0
+		pink.MoveSpeed = 0
+		combat:ConfigurePhase2C3BPassiveTarget(greenTarget, 1000)
+		combat:ConfigurePhase2C3BPassiveTarget(pinkPrimary, 1000)
+		combat:ConfigurePhase2C3BPassiveTarget(pinkSecondary, 1000)
+		combat.SimAccumulator = 0
+		combat.SimTick = 0
+		combat.ActiveBattleLimitTicks = combat.BattleTimeLimitTicks
+		combat.SimulationSpeed = 1
+		combat.IsRunning = true
+		combat:RunPhase2C3BTicks(19)
+
+		local passed = combat.SimTick == 19
+			and green.SecondaryTargetLane == "Top"
+			and math.abs(green.SecondaryDamageRate - 0.5) <= 0.000001
+			and pink.SecondaryTargetLane == "Bottom"
+			and math.abs(pink.SecondaryDamageRate - 0.5) <= 0.000001
+			and greenTarget.HP == 865
+			and pinkPrimary.HP == 820
+			and pinkSecondary.HP == 910
+			and #green.DamageIntentHistory == 2
+			and #pink.DamageIntentHistory == 2
+			and green.DamageIntentHistory[1].IntentKind == "Primary"
+			and green.DamageIntentHistory[1].Damage == 90
+			and green.DamageIntentHistory[2].IntentKind == "Secondary"
+			and green.DamageIntentHistory[2].Damage == 45
+			and pink.DamageIntentHistory[1].IntentKind == "Primary"
+			and pink.DamageIntentHistory[1].Damage == 180
+			and pink.DamageIntentHistory[2].IntentKind == "Secondary"
+			and pink.DamageIntentHistory[2].Damage == 90
+
+		log(
+			"[Phase2C3B][ActualSpawn] Tick="
+			.. tostring(combat.SimTick)
+			.. ", Green="
+			.. green.SecondaryTargetLane
+			.. "/"
+			.. tostring(green.SecondaryDamageRate)
+			.. ", GreenTargetHP="
+			.. tostring(greenTarget.HP)
+			.. ", Pink="
+			.. pink.SecondaryTargetLane
+			.. "/"
+			.. tostring(pink.SecondaryDamageRate)
+			.. ", PinkTargetsHP="
+			.. tostring(pinkPrimary.HP)
+			.. "/"
+			.. tostring(pinkSecondary.HP)
+		)
+		return passed
+	end
+
+	@ExecSpace("ServerOnly")
+	method any SpawnPhase2C3BActualUnit(
+		string monsterId,
+		integer ownerSide,
+		integer slotIndex,
+		Vector3 position,
+		integer placementOrder
+	)
+		-- 실제 SpawnPlacement 데이터 경로를 공유하고 새로 등록된 ThreeLaneUnit을 반환한다.
+		local combat = self:GetCombat()
+		local monster = self:GetMonsterById(monsterId)
+		if not isvalid(combat) or monster == nil then
+			return nil
+		end
+		local beforeCount = #combat.Units
+		self:SpawnPlacement(
+			{
+				Order = placementOrder,
+				CardIndex = monster.CardIndex,
+				MonsterId = monster.MonsterId,
+				Cost = monster.Cost,
+				SlotIndex = slotIndex,
+				Position = position,
+				OwnerUserId = "Phase2C3BRegression",
+				OwnerSide = ownerSide
+			}
+		)
+		return combat.Units[beforeCount + 1]
+	end
+
+	@ExecSpace("ServerOnly")
 	method boolean RecordPhase2C3ARegression(string name, boolean passed)
 		-- Phase 2C-3A 항목별 결과를 독립 로그 접두사로 기록한다.
 		if passed then
@@ -1798,6 +1916,8 @@ script ThreeLaneBoard extends Component
 			and unit.RangeClass == monster.RangeClass
 			and math.abs(unit.AttackRange - monster.AttackRange) <= 0.000001
 			and unit.NexusDamage == monster.NexusDamage
+			and unit.SecondaryTargetLane == monster.SecondaryTargetLane
+			and math.abs(unit.SecondaryDamageRate - monster.SecondaryDamageRate) <= 0.000001
 	end
 
 	@ExecSpace("ServerOnly")

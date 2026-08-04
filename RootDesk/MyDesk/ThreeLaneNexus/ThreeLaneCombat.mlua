@@ -360,11 +360,17 @@ script ThreeLaneCombat extends Component
 	@ExecSpace("ServerOnly")
 	method any FindFrontTarget(any attacker, table snapshot)
 		-- 같은 라인의 반대 진영 중 X 거리가 가장 짧은 적을 선택하고 동률은 ID로 깬다.
+		return self:FindFrontTargetInLane(attacker, snapshot, attacker.LaneIndex)
+	end
+
+	@ExecSpace("ServerOnly")
+	method any FindFrontTargetInLane(any attacker, table snapshot, integer laneIndex)
+		-- 지정 라인의 최전방 적을 거리순으로 선택한다. 추가타도 같은 안정 ID 동률 규칙을 공유한다.
 		local best = nil
 		local bestDistance = 999999
 		for _, candidate in ipairs(snapshot) do
 			if candidate.OwnerSide ~= attacker.OwnerSide
-				and candidate.LaneIndex == attacker.LaneIndex
+				and candidate.LaneIndex == laneIndex
 				and self:IsUnitActive(candidate) then
 				local distance = math.abs(candidate.SimX - attacker.SimX)
 				if distance < bestDistance - 0.000001
@@ -376,6 +382,19 @@ script ThreeLaneCombat extends Component
 			end
 		end
 		return best
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetLaneIndexByName(string laneName)
+		-- MonsterData 문자열을 전투 보드의 고정 라인 인덱스로 변환한다.
+		if laneName == "Top" then
+			return 1
+		elseif laneName == "Middle" then
+			return 2
+		elseif laneName == "Bottom" then
+			return 3
+		end
+		return 0
 	end
 
 	@ExecSpace("ServerOnly")
@@ -445,6 +464,8 @@ script ThreeLaneCombat extends Component
 							AttackerId = unit.CombatUnitId,
 							TargetKind = targetKind,
 							TargetId = 0,
+							IntentKind = "Nexus",
+							IntentOrder = 1,
 							Damage = unit.NexusDamage
 						}
 					)
@@ -475,17 +496,30 @@ script ThreeLaneCombat extends Component
 				and unit.NextAttackTick >= 0
 				and self.SimTick >= unit.NextAttackTick then
 				local target = self:GetUnitById(unit.TargetCombatUnitId)
-				if self:IsUnitActive(target) then
+				local inRange = self:IsUnitActive(target)
+					and math.abs(target.SimX - unit.SimX) <= unit.AttackRange + 0.000001
+				if inRange then
 					table.insert(
 						intents,
 						{
 							AttackerId = unit.CombatUnitId,
 							TargetKind = "Unit",
 							TargetId = target.CombatUnitId,
+							IntentKind = "Primary",
+							IntentOrder = 1,
 							Damage = unit.Attack
 						}
 					)
 					table.insert(unit.AttackIntentTicks, self.SimTick)
+					table.insert(
+						unit.DamageIntentHistory,
+						{
+							Tick = self.SimTick,
+							IntentKind = "Primary",
+							TargetId = target.CombatUnitId,
+							Damage = unit.Attack
+						}
+					)
 					log(
 						"[ThreeLaneCombat][AttackIntent] Tick="
 						.. tostring(self.SimTick)
@@ -496,22 +530,101 @@ script ThreeLaneCombat extends Component
 						.. ", Damage="
 						.. tostring(unit.Attack)
 					)
+					self:CollectSecondaryAttackIntent(unit, snapshot, intents)
 					unit.NextAttackTick = unit.NextAttackTick + unit.AttackIntervalTicks
 				else
-					self:CancelCurrentTarget(unit, "TargetLostBeforeIntent")
+					self:CancelCurrentTarget(unit, "TargetInvalidOrOutOfRangeBeforeIntent")
 				end
 			end
 		end
 	end
 
 	@ExecSpace("ServerOnly")
+	method void CollectSecondaryAttackIntent(any unit, table snapshot, table intents)
+		-- 유효한 기본 유닛 공격과 같은 Tick에만 데이터가 지정한 고정 라인 추가타를 등록한다.
+		local rate = unit.SecondaryDamageRate or 0
+		local laneIndex = self:GetLaneIndexByName(unit.SecondaryTargetLane or "None")
+		if rate <= 0 or laneIndex == 0 then
+			return
+		end
+
+		local secondaryTarget = self:FindFrontTargetInLane(unit, snapshot, laneIndex)
+		if secondaryTarget == nil then
+			log(
+				"[ThreeLaneCombat][SecondaryConsumed] Tick="
+				.. tostring(self.SimTick)
+				.. ", Attacker="
+				.. tostring(unit.CombatUnitId)
+				.. ", Lane="
+				.. tostring(unit.SecondaryTargetLane)
+				.. ", Reason=NoTarget"
+			)
+			return
+		end
+
+		local damage = math.floor(unit.Attack * rate)
+		if damage <= 0 then
+			log(
+				"[ThreeLaneCombat][SecondaryConsumed] Tick="
+				.. tostring(self.SimTick)
+				.. ", Attacker="
+				.. tostring(unit.CombatUnitId)
+				.. ", Reason=NonPositiveDamage"
+			)
+			return
+		end
+
+		table.insert(
+			intents,
+			{
+				AttackerId = unit.CombatUnitId,
+				TargetKind = "Unit",
+				TargetId = secondaryTarget.CombatUnitId,
+				IntentKind = "Secondary",
+				IntentOrder = 2,
+				Damage = damage
+			}
+		)
+		table.insert(unit.SecondaryIntentTicks, self.SimTick)
+		table.insert(unit.SecondaryTargetHistory, secondaryTarget.CombatUnitId)
+		table.insert(
+			unit.DamageIntentHistory,
+			{
+				Tick = self.SimTick,
+				IntentKind = "Secondary",
+				TargetId = secondaryTarget.CombatUnitId,
+				Damage = damage
+			}
+		)
+		log(
+			"[ThreeLaneCombat][SecondaryIntent] Tick="
+			.. tostring(self.SimTick)
+			.. ", Attacker="
+			.. tostring(unit.CombatUnitId)
+			.. ", Target="
+			.. tostring(secondaryTarget.CombatUnitId)
+			.. ", Lane="
+			.. tostring(unit.SecondaryTargetLane)
+			.. ", Rate="
+			.. tostring(rate)
+			.. ", CurrentAttack="
+			.. tostring(unit.Attack)
+			.. ", Damage="
+			.. tostring(damage)
+		)
+	end
+
+	@ExecSpace("ServerOnly")
 	method table ApplyDamageIntents(table intents)
-		-- intent를 공격자 ID 순서로 기록하되 모든 피해는 사망 처리 전에 먼저 적용한다.
+		-- intent를 공격자·기본/추가 순서·대상 ID로 고정하되 모든 피해는 사망 처리 전에 적용한다.
 		table.sort(
 			intents,
 			function(a, b)
 				if a.AttackerId == b.AttackerId then
-					return a.TargetId < b.TargetId
+					if a.IntentOrder == b.IntentOrder then
+						return a.TargetId < b.TargetId
+					end
+					return a.IntentOrder < b.IntentOrder
 				end
 				return a.AttackerId < b.AttackerId
 			end
@@ -531,6 +644,8 @@ script ThreeLaneCombat extends Component
 						.. tostring(intent.AttackerId)
 						.. ", Target="
 						.. tostring(intent.TargetId)
+						.. ", Kind="
+						.. tostring(intent.IntentKind)
 						.. ", HP="
 						.. tostring(before)
 						.. "->"
@@ -677,6 +792,9 @@ script ThreeLaneCombat extends Component
 		unit.PendingExit = false
 		unit.AttackIntentTicks = {}
 		unit.TargetHistory = {}
+		unit.SecondaryIntentTicks = {}
+		unit.SecondaryTargetHistory = {}
+		unit.DamageIntentHistory = {}
 		if unit.IsTestUnit ~= true then
 			unit:SetVisualVelocity(0)
 		end
@@ -729,6 +847,417 @@ script ThreeLaneCombat extends Component
 		self.MakerTestMode = false
 		self.CurrentScenario = ""
 		self.ScenarioMetrics = {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunMakerPhase2C3BTests()
+		-- 고정 라인 추가타 13개 규칙 시나리오와 실제 스폰 경로를 한 번에 검증한다.
+		self.MakerHarnessRunning = true
+		local allPassed = true
+		local scenarios = {
+			"GreenFocusTop",
+			"GreenSplitTop",
+			"GreenEmptySecondary",
+			"NoPrimaryNoSecondary",
+			"PinkFocusBottom",
+			"PinkSplitBottom",
+			"SecondaryIgnoresRange",
+			"BuffScalesSecondary",
+			"SecondaryFloor",
+			"SameTickLethal",
+			"BothSidesSecondary",
+			"SpeedDeterminism",
+			"NextTurnReset"
+		}
+
+		for _, scenarioName in ipairs(scenarios) do
+			local passed = self:RunPhase2C3BScenario(scenarioName)
+			allPassed = self:RecordPhase2C3BResult(scenarioName, passed) and allPassed
+		end
+
+		local board = self:GetBoard()
+		if isvalid(board) then
+			local actualPassed = board:RunMakerPhase2C3BActualSpawnRegression()
+			allPassed = self:RecordPhase2C3BResult("ActualSpawnSecondary", actualPassed) and allPassed
+			board:ResetBattle()
+		else
+			allPassed = self:RecordPhase2C3BResult("ActualSpawnSecondary", false) and allPassed
+		end
+		self.MakerHarnessRunning = false
+
+		if allPassed then
+			log("[Phase2C3B][TEST][ALL] PASS - normal play state restored")
+		else
+			log_error("[Phase2C3B][TEST][ALL] FAIL - see scenario logs")
+		end
+		return allPassed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RecordPhase2C3BResult(string scenarioName, boolean passed)
+		-- 각 규칙의 결과를 독립 접두사로 남겨 Maker runtime 로그에서 누락 없이 확인한다.
+		if passed then
+			log("[Phase2C3B][TEST][" .. scenarioName .. "] PASS")
+		else
+			log_error("[Phase2C3B][TEST][" .. scenarioName .. "] FAIL")
+		end
+		return passed
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean PreparePhase2C3BTestState()
+		-- 시나리오마다 보드·레지스트리·Tick을 정상 초기값에서 다시 구성한다.
+		local board = self:GetBoard()
+		if not isvalid(board) then
+			return false
+		end
+		self.MakerHarnessRunning = true
+		board:ResetBattle()
+		self.MakerHarnessRunning = true
+		self.MakerTestMode = true
+		self.CurrentScenario = "Phase2C3B"
+		self.ScenarioMetrics = {}
+		self.ActiveBattleLimitTicks = self.BattleTimeLimitTicks
+		self.SimAccumulator = 0
+		self.SimTick = 0
+		self.BacklogWarned = false
+		self.BacklogWarningCount = 0
+		self.IsRunning = true
+		self.SimulationSpeed = 1
+		board.PlayerNexusHp = 30
+		board.EnemyNexusHp = 30
+		board.BattleState = "Playing"
+		board.Phase = "Battle"
+		board.CurrentCost = 1
+		board.EnemyCurrentCost = 1
+		board.BattleRemaining = 60
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ConfigurePhase2C3BPassiveTarget(any unit, integer hp)
+		-- 표적이 시나리오 결과에 역공·이동으로 개입하지 않게 하되 정상 target 탐색에는 남긴다.
+		if unit == nil then
+			return
+		end
+		unit.HP = hp
+		unit.MaxHP = hp
+		unit.Attack = 0
+		unit.BaseAttack = 0
+		unit.CombatAttackBonus = 0
+		unit.FirstAttackDelayTicks = 9999
+		unit.MoveSpeed = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RunPhase2C3BTicks(integer targetTick)
+		-- 정상 StepBattle 경로만 사용해 요청 Tick까지 진행한다.
+		local safety = 0
+		while self.IsRunning and self.SimTick < targetTick and safety < 5000 do
+			self:StepBattle()
+			safety = safety + 1
+		end
+		if safety >= 5000 and self.IsRunning then
+			self.IsRunning = false
+			log_error("[Phase2C3B][TEST] tick safety limit reached")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean HasDamageIntent(any unit, integer index, string kind, integer targetId, integer damage)
+		-- 한 공격의 기본·추가 피해가 합쳐지지 않은 별도 intent인지 정확히 비교한다.
+		if unit == nil or unit.DamageIntentHistory == nil then
+			return false
+		end
+		local intent = unit.DamageIntentHistory[index]
+		return intent ~= nil
+			and intent.Tick == 19
+			and intent.IntentKind == kind
+			and intent.TargetId == targetId
+			and intent.Damage == damage
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean RunPhase2C3BScenario(string scenarioName)
+		-- 테스트 전용 결과 조작 없이 실제 target·range·intent·batch damage 경로를 사용한다.
+		if scenarioName == "SpeedDeterminism" then
+			local speed1 = self:BuildPhase2C3BSpeedSignature(1)
+			local speed2 = self:BuildPhase2C3BSpeedSignature(2)
+			log(
+				"[Phase2C3B][SpeedCompare] Speed1="
+				.. speed1
+				.. ", Speed2="
+				.. speed2
+				.. ", Equal="
+				.. tostring(speed1 ~= "" and speed1 == speed2)
+			)
+			return speed1 ~= "" and speed1 == speed2
+		end
+
+		if scenarioName == "NextTurnReset" then
+			if not self:PreparePhase2C3BTestState() then
+				return false
+			end
+			local oldGreen = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+			local oldTarget = self:CreateTestMonster("drake", 2, 2, 0.3)
+			if oldGreen == nil or oldTarget == nil then
+				return false
+			end
+			self:ConfigurePhase2C3BPassiveTarget(oldTarget, 1000)
+			oldGreen.MoveSpeed = 0
+			oldGreen.CombatAttackBonus = 30
+			oldGreen.Attack = oldGreen.BaseAttack + oldGreen.CombatAttackBonus
+			self:RunPhase2C3BTicks(19)
+			local oldResolved = #oldGreen.DamageIntentHistory == 1
+				and oldGreen.Attack == 120
+
+			if not self:PreparePhase2C3BTestState() then
+				return false
+			end
+			local freshGreen = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+			return oldResolved
+				and freshGreen ~= nil
+				and freshGreen.Attack == 90
+				and freshGreen.BaseAttack == 90
+				and freshGreen.CombatAttackBonus == 0
+				and freshGreen.TargetCombatUnitId == 0
+				and #freshGreen.AttackIntentTicks == 0
+				and #freshGreen.SecondaryIntentTicks == 0
+				and #freshGreen.SecondaryTargetHistory == 0
+				and #freshGreen.DamageIntentHistory == 0
+				and freshGreen.SecondaryTargetLane == "Top"
+				and math.abs(freshGreen.SecondaryDamageRate - 0.5) <= 0.000001
+		end
+
+		if not self:PreparePhase2C3BTestState() then
+			return false
+		end
+
+		if scenarioName == "GreenFocusTop" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 1, -0.3)
+			local target = self:CreateTestMonster("drake", 2, 1, 0.3)
+			if green == nil or target == nil then return false end
+			green.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(target, 1000)
+			self:RunPhase2C3BTicks(19)
+			return target.HP == 865
+				and #green.DamageIntentHistory == 2
+				and self:HasDamageIntent(green, 1, "Primary", target.CombatUnitId, 90)
+				and self:HasDamageIntent(green, 2, "Secondary", target.CombatUnitId, 45)
+		end
+
+		if scenarioName == "GreenSplitTop" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+			local primary = self:CreateTestMonster("drake", 2, 2, 0.3)
+			local secondary = self:CreateTestMonster("drake", 2, 1, 5.0)
+			if green == nil or primary == nil or secondary == nil then return false end
+			green.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(primary, 1000)
+			self:ConfigurePhase2C3BPassiveTarget(secondary, 1000)
+			self:RunPhase2C3BTicks(19)
+			return primary.HP == 910 and secondary.HP == 955
+				and self:HasDamageIntent(green, 1, "Primary", primary.CombatUnitId, 90)
+				and self:HasDamageIntent(green, 2, "Secondary", secondary.CombatUnitId, 45)
+		end
+
+		if scenarioName == "GreenEmptySecondary" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+			local primary = self:CreateTestMonster("drake", 2, 2, 0.3)
+			if green == nil or primary == nil then return false end
+			green.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(primary, 1000)
+			self:RunPhase2C3BTicks(19)
+			return primary.HP == 910
+				and #green.DamageIntentHistory == 1
+				and #green.SecondaryIntentTicks == 0
+				and self:HasDamageIntent(green, 1, "Primary", primary.CombatUnitId, 90)
+		end
+
+		if scenarioName == "NoPrimaryNoSecondary" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 2, -3.0)
+			local topEnemy = self:CreateTestMonster("drake", 2, 1, 0.0)
+			if green == nil or topEnemy == nil then return false end
+			self:ConfigurePhase2C3BPassiveTarget(topEnemy, 1000)
+			self:RunPhase2C3BTicks(19)
+			return green.SimX > -3.0
+				and green.TargetCombatUnitId == 0
+				and #green.DamageIntentHistory == 0
+				and #green.SecondaryIntentTicks == 0
+		end
+
+		if scenarioName == "PinkFocusBottom" then
+			local pink = self:CreateTestMonster("pink_bean", 1, 3, -0.3)
+			local target = self:CreateTestMonster("drake", 2, 3, 0.3)
+			if pink == nil or target == nil then return false end
+			pink.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(target, 1000)
+			self:RunPhase2C3BTicks(19)
+			return target.HP == 730
+				and #pink.DamageIntentHistory == 2
+				and self:HasDamageIntent(pink, 1, "Primary", target.CombatUnitId, 180)
+				and self:HasDamageIntent(pink, 2, "Secondary", target.CombatUnitId, 90)
+		end
+
+		if scenarioName == "PinkSplitBottom" then
+			local pink = self:CreateTestMonster("pink_bean", 1, 2, -0.3)
+			local primary = self:CreateTestMonster("drake", 2, 2, 0.3)
+			local secondary = self:CreateTestMonster("drake", 2, 3, 5.0)
+			if pink == nil or primary == nil or secondary == nil then return false end
+			pink.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(primary, 1000)
+			self:ConfigurePhase2C3BPassiveTarget(secondary, 1000)
+			self:RunPhase2C3BTicks(19)
+			return primary.HP == 820 and secondary.HP == 910
+				and self:HasDamageIntent(pink, 1, "Primary", primary.CombatUnitId, 180)
+				and self:HasDamageIntent(pink, 2, "Secondary", secondary.CombatUnitId, 90)
+		end
+
+		if scenarioName == "SecondaryIgnoresRange" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+			local primary = self:CreateTestMonster("drake", 2, 2, 0.3)
+			local farTop = self:CreateTestMonster("drake", 2, 1, 5.0)
+			if green == nil or primary == nil or farTop == nil then return false end
+			green.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(primary, 1000)
+			self:ConfigurePhase2C3BPassiveTarget(farTop, 1000)
+			local distance = math.abs(farTop.SimX - green.SimX)
+			self:RunPhase2C3BTicks(19)
+			return distance > green.AttackRange
+				and farTop.HP == 955
+				and self:HasDamageIntent(green, 2, "Secondary", farTop.CombatUnitId, 45)
+		end
+
+		if scenarioName == "BuffScalesSecondary" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 1, -0.3)
+			local target = self:CreateTestMonster("drake", 2, 1, 0.3)
+			local data = self:GetData()
+			if green == nil or target == nil or not isvalid(data) then return false end
+			local original = data:GetMonsterById("green_mushroom")
+			green.MoveSpeed = 0
+			green.CombatAttackBonus = 30
+			green.Attack = green.BaseAttack + green.CombatAttackBonus
+			self:ConfigurePhase2C3BPassiveTarget(target, 1000)
+			self:RunPhase2C3BTicks(19)
+			return target.HP == 820
+				and original ~= nil and original.Attack == 90
+				and green.Attack == 120
+				and self:HasDamageIntent(green, 1, "Primary", target.CombatUnitId, 120)
+				and self:HasDamageIntent(green, 2, "Secondary", target.CombatUnitId, 60)
+		end
+
+		if scenarioName == "SecondaryFloor" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 1, -0.3)
+			local target = self:CreateTestMonster("drake", 2, 1, 0.3)
+			if green == nil or target == nil then return false end
+			green.MoveSpeed = 0
+			green.CombatAttackBonus = 31
+			green.Attack = green.BaseAttack + green.CombatAttackBonus
+			self:ConfigurePhase2C3BPassiveTarget(target, 1000)
+			self:RunPhase2C3BTicks(19)
+			return target.HP == 819
+				and self:HasDamageIntent(green, 1, "Primary", target.CombatUnitId, 121)
+				and self:HasDamageIntent(green, 2, "Secondary", target.CombatUnitId, 60)
+		end
+
+		if scenarioName == "SameTickLethal" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 1, -0.3)
+			local target = self:CreateTestMonster("drake", 2, 1, 0.3)
+			if green == nil or target == nil then return false end
+			green.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(target, 90)
+			self:RunPhase2C3BTicks(19)
+			return target.HP == -45 and target.DeathTick == 19
+				and #green.DamageIntentHistory == 2
+				and self:HasDamageIntent(green, 2, "Secondary", target.CombatUnitId, 45)
+		end
+
+		if scenarioName == "BothSidesSecondary" then
+			local green = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+			local pink = self:CreateTestMonster("pink_bean", 2, 2, 0.3)
+			local topTarget = self:CreateTestMonster("drake", 2, 1, 5.0)
+			local bottomTarget = self:CreateTestMonster("drake", 1, 3, -5.0)
+			if green == nil or pink == nil or topTarget == nil or bottomTarget == nil then return false end
+			green.MoveSpeed = 0
+			pink.MoveSpeed = 0
+			self:ConfigurePhase2C3BPassiveTarget(topTarget, 1000)
+			self:ConfigurePhase2C3BPassiveTarget(bottomTarget, 1000)
+			self:RunPhase2C3BTicks(19)
+			return green.HP == 140 and pink.HP == 760
+				and topTarget.HP == 955 and bottomTarget.HP == 910
+				and #green.DamageIntentHistory == 2
+				and #pink.DamageIntentHistory == 2
+				and self:HasDamageIntent(green, 2, "Secondary", topTarget.CombatUnitId, 45)
+				and self:HasDamageIntent(pink, 2, "Secondary", bottomTarget.CombatUnitId, 90)
+		end
+
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method string BuildPhase2C3BSpeedSignature(integer speed)
+		-- 동일한 추가타 사망 장면을 프레임당 1Tick/2Tick 처리로 실행해 결과를 직렬화한다.
+		if not self:PreparePhase2C3BTestState() then
+			return ""
+		end
+		local green = self:CreateTestMonster("green_mushroom", 1, 2, -0.3)
+		local primary = self:CreateTestMonster("drake", 2, 2, 0.3)
+		local secondary = self:CreateTestMonster("drake", 2, 1, 5.0)
+		if green == nil or primary == nil or secondary == nil then
+			return ""
+		end
+		green.MoveSpeed = 0
+		self:ConfigurePhase2C3BPassiveTarget(primary, 90)
+		self:ConfigurePhase2C3BPassiveTarget(secondary, 45)
+		self.SimulationSpeed = speed
+		local safety = 0
+		while self.IsRunning and self.SimTick < 20 and safety < 100 do
+			self:AdvanceSimulation(self.SimStep)
+			safety = safety + 1
+		end
+		local board = self:GetBoard()
+		if self.SimTick ~= 20 or not isvalid(board) then
+			return ""
+		end
+		return "Tick="
+			.. tostring(self.SimTick)
+			.. "|Intents="
+			.. self:JoinDamageIntentHistory(green.DamageIntentHistory)
+			.. "|Primary="
+			.. tostring(primary.HP)
+			.. ":D"
+			.. tostring(primary.DeathTick)
+			.. "|Secondary="
+			.. tostring(secondary.HP)
+			.. ":D"
+			.. tostring(secondary.DeathTick)
+			.. "|Nexus="
+			.. tostring(board.PlayerNexusHp)
+			.. "/"
+			.. tostring(board.EnemyNexusHp)
+			.. "|Turn="
+			.. tostring(board.TurnNumber)
+			.. "|Phase="
+			.. board.Phase
+	end
+
+	@ExecSpace("ServerOnly")
+	method string JoinDamageIntentHistory(table history)
+		-- 별도 기본·추가 intent의 Tick·종류·대상·피해를 안정 문자열로 변환한다.
+		local text = ""
+		for index, intent in ipairs(history) do
+			if index > 1 then
+				text = text .. ","
+			end
+			text = text
+				.. tostring(intent.Tick)
+				.. ":"
+				.. tostring(intent.IntentKind)
+				.. ":"
+				.. tostring(intent.TargetId)
+				.. ":"
+				.. tostring(intent.Damage)
+		end
+		return text
 	end
 
 	@ExecSpace("ServerOnly")
@@ -995,6 +1524,8 @@ script ThreeLaneCombat extends Component
 			MoveSpeed = monster.MoveSpeed,
 			AttackRange = monster.AttackRange,
 			NexusDamage = monster.NexusDamage,
+			SecondaryTargetLane = monster.SecondaryTargetLane,
+			SecondaryDamageRate = monster.SecondaryDamageRate,
 			SimX = simX,
 			CombatStartX = simX,
 			CombatStartY = 0,
@@ -1010,7 +1541,10 @@ script ThreeLaneCombat extends Component
 			IsTestUnit = true,
 			ForcedDeathTick = -1,
 			AttackIntentTicks = {},
-			TargetHistory = {}
+			TargetHistory = {},
+			SecondaryIntentTicks = {},
+			SecondaryTargetHistory = {},
+			DamageIntentHistory = {}
 		}
 		if ownerSide == 2 then
 			unit.TargetNexusX = -5.35

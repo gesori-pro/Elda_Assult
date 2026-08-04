@@ -97,6 +97,10 @@ script ThreeLaneData extends Component
 			end
 		end
 
+		if not self:ValidateSecondaryAttackContract() then
+			return false
+		end
+
 		local gradeRows = gradeData:GetAllRow()
 		for rowIndex, row in ipairs(gradeRows) do
 			local rule = self:ParseGradeRule(row)
@@ -173,8 +177,8 @@ script ThreeLaneData extends Component
 			AttackRange = tonumber(row:GetItem("AttackRange")) or 0,
 			NexusDamage = tonumber(row:GetItem("NexusDamage")) or 0,
 			TargetingRule = row:GetItem("TargetingRule") or "",
-			SecondaryTargetLane = row:GetItem("SecondaryTargetLane") or "",
-			SecondaryDamage = tonumber(row:GetItem("SecondaryDamage")) or 0,
+			SecondaryTargetLane = row:GetItem("SecondaryTargetLane") or "None",
+			SecondaryDamageRate = tonumber(row:GetItem("SecondaryDamageRate")) or 0,
 			EffectType = row:GetItem("EffectType") or "",
 			EffectValue = tonumber(row:GetItem("EffectValue")) or 0,
 			EffectValue2 = tonumber(row:GetItem("EffectValue2")) or 0,
@@ -212,6 +216,40 @@ script ThreeLaneData extends Component
 			return false
 		end
 
+		local secondaryLane = monster.SecondaryTargetLane
+		if secondaryLane ~= "None"
+			and secondaryLane ~= "Top"
+			and secondaryLane ~= "Middle"
+			and secondaryLane ~= "Bottom" then
+			log_error(
+				"[ThreeLaneData][FAIL] invalid SecondaryTargetLane Id="
+				.. monster.MonsterId
+				.. ", Lane="
+				.. tostring(secondaryLane)
+			)
+			return false
+		end
+
+		if monster.SecondaryDamageRate < 0 or monster.SecondaryDamageRate > 1 then
+			log_error(
+				"[ThreeLaneData][FAIL] invalid SecondaryDamageRate Id="
+				.. monster.MonsterId
+				.. ", Rate="
+				.. tostring(monster.SecondaryDamageRate)
+			)
+			return false
+		end
+
+		local hasSecondaryLane = secondaryLane ~= "None"
+		local hasSecondaryRate = monster.SecondaryDamageRate > 0
+		if hasSecondaryLane ~= hasSecondaryRate then
+			log_error(
+				"[ThreeLaneData][FAIL] secondary lane/rate mismatch Id="
+				.. monster.MonsterId
+			)
+			return false
+		end
+
 		local expectedAttackTicks = math.floor(monster.AttackInterval * 60 + 0.5)
 		local expectedFirstTicks = math.floor(monster.FirstAttackDelay * 60 + 0.5)
 		if monster.AttackIntervalTicks ~= expectedAttackTicks
@@ -231,6 +269,56 @@ script ThreeLaneData extends Component
 			return false
 		end
 
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidateSecondaryAttackContract()
+		-- Phase 2C-3B의 두 카드만 고정 라인 50% 추가타를 가지며 나머지 11종은 비활성이다.
+		local green = self.MonsterById["green_mushroom"]
+		local pink = self.MonsterById["pink_bean"]
+		if green == nil or pink == nil then
+			log_error("[ThreeLaneData][FAIL] secondary attack source missing")
+			return false
+		end
+
+		if green.SecondaryTargetLane ~= "Top"
+			or math.abs(green.SecondaryDamageRate - 0.5) > 0.000001 then
+			log_error("[ThreeLaneData][FAIL] green_mushroom secondary contract mismatch")
+			return false
+		end
+
+		if pink.SecondaryTargetLane ~= "Bottom"
+			or math.abs(pink.SecondaryDamageRate - 0.5) > 0.000001 then
+			log_error("[ThreeLaneData][FAIL] pink_bean secondary contract mismatch")
+			return false
+		end
+
+		local inactiveCount = 0
+		for monsterId, monster in pairs(self.MonsterById) do
+			if monsterId ~= "green_mushroom" and monsterId ~= "pink_bean" then
+				if monster.SecondaryTargetLane ~= "None"
+					or math.abs(monster.SecondaryDamageRate) > 0.000001 then
+					log_error(
+						"[ThreeLaneData][FAIL] unexpected secondary attack Id=" .. monsterId
+					)
+					return false
+				end
+				inactiveCount = inactiveCount + 1
+			end
+		end
+
+		if inactiveCount ~= 11 then
+			log_error(
+				"[ThreeLaneData][FAIL] inactive secondary count expected=11 actual="
+				.. tostring(inactiveCount)
+			)
+			return false
+		end
+
+		log(
+			"[ThreeLaneData][Secondary][PASS] Green=Top/0.5, Pink=Bottom/0.5, Inactive=11"
+		)
 		return true
 	end
 

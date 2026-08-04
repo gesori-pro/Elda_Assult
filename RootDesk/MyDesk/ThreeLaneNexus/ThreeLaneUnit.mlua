@@ -43,6 +43,10 @@ script ThreeLaneUnit extends Component
 
 	property integer NexusDamage = 5
 
+	property string SecondaryTargetLane = "None"
+
+	property number SecondaryDamageRate = 0
+
 	property number SimX = 0
 
 	property number CombatStartX = 0
@@ -75,6 +79,12 @@ script ThreeLaneUnit extends Component
 
 	property table TargetHistory = {}
 
+	property table SecondaryIntentTicks = {}
+
+	property table SecondaryTargetHistory = {}
+
+	property table DamageIntentHistory = {}
+
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
 		-- 전투 판정은 Combat만 수행하므로 소환 직후 시각 이동을 정지한다.
@@ -96,6 +106,9 @@ script ThreeLaneUnit extends Component
 		self.ForcedDeathTick = -1
 		self.AttackIntentTicks = {}
 		self.TargetHistory = {}
+		self.SecondaryIntentTicks = {}
+		self.SecondaryTargetHistory = {}
+		self.DamageIntentHistory = {}
 		self:SetVisualVelocity(0)
 	end
 
